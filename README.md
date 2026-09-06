@@ -1,8 +1,8 @@
 # PR Cockpit
 
-**A review queue, not another row of GitHub tabs.**
+**An extremely fast GitHub for pull request review.** PRs open in 20 ms instead of 1.4 s ([benchmark](docs/BENCHMARKS.md)).
 
-PR Cockpit is a desktop app for GitHub pull requests on **macOS and Linux**. See what needs your attention, read the diff, work through review threads, and merge without piecing the PR together across tabs. A local cache keeps the review close; GitHub stays the source of truth.
+PR Cockpit is a desktop app for GitHub pull requests on **macOS and Linux**. A local mirror, kept current by webhooks, holds every PR you care about, so the queue, the diff, the failed check logs and the review threads paint from disk. Keyboard for everything; GitHub stays the source of truth.
 
 [Install](#install) · [See the workflow](#from-finding-the-pr-to-finishing-the-review) · [CLI for humans and agents](#the-same-pr-context-in-your-terminal) · [Website](https://prcockpit.com/)
 
