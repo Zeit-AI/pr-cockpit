@@ -22,6 +22,11 @@ export const SETTINGS_SECTIONS = [
     iconPaths: ["m8 7-4 5 4 5m8-10 4 5-4 5M13.5 5l-3 14"],
   },
   {
+    id: "notifications",
+    label: "Notifications",
+    iconPaths: ["M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z", "M10 20.5a2 2 0 0 0 4 0"],
+  },
+  {
     id: "automerge",
     label: "Agents & merging",
     iconPaths: ["M7 8.5h10v9H7zM9 5.5h6M12 5.5V3.5", "M9.5 12h.01m4.99 0h.01M10 15h4"],

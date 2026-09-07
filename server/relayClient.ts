@@ -28,7 +28,7 @@ interface RelayPollDependencies {
 interface RelayWebSocket {
   addEventListener(type: "open", listener: () => void, options?: { once?: boolean }): void;
   addEventListener(type: "message", listener: (event: MessageEvent) => void): void;
-  addEventListener(type: "close", listener: () => void, options?: { once?: boolean }): void;
+  addEventListener(type: "close", listener: (event: { code: number; reason: string }) => void, options?: { once?: boolean }): void;
   addEventListener(type: "error", listener: () => void, options?: { once?: boolean }): void;
   close(): void;
 }
@@ -37,6 +37,7 @@ interface RelayStreamDependencies extends RelayPollDependencies {
   fullPoll?: typeof pollOnce;
   socket?: (url: string) => RelayWebSocket;
   onOpen?: () => void;
+  expectedClose?: () => boolean;
 }
 
 interface RelayClientDependencies extends RelayStreamDependencies {
@@ -179,6 +180,7 @@ export async function streamRelayOnce(
 
   return await new Promise<void>((resolve, reject) => {
     let opened = false;
+    let socketFailed = false;
     let settled = false;
     let queue = Promise.resolve();
     const settle = (error?: Error) => {
@@ -213,8 +215,20 @@ export async function streamRelayOnce(
         throw error;
       });
     });
-    socket.addEventListener("error", () => settle(new Error("relay WebSocket failed")), { once: true });
-    socket.addEventListener("close", () => settle(opened ? new Error("relay WebSocket closed") : new Error("relay WebSocket failed to open")), { once: true });
+    socket.addEventListener("error", () => {
+      socketFailed = true;
+    }, { once: true });
+    socket.addEventListener("close", (event) => {
+      if (deps.expectedClose?.()) {
+        settle();
+        return;
+      }
+      const code = Number.isInteger(event?.code) ? event.code : 1005;
+      const closeReason = event?.reason?.trim().replace(/\s+/g, " ").slice(0, 256);
+      const reason = closeReason ? `, reason=${closeReason}` : "";
+      const state = opened ? "closed" : socketFailed ? "failed to open" : "closed before opening";
+      settle(new Error(`relay WebSocket ${state} (code=${code}${reason})`));
+    }, { once: true });
   });
 }
 
@@ -236,13 +250,13 @@ class RelayConnection {
     if (url !== this.url) {
       this.url = url;
       this.mode = "unknown";
+      this.generation++;
       this.stream?.close();
       this.stream = null;
       this.running = false;
       this.repoSignature = "";
       this.reconnectAt = 0;
       this.reconnectAttempt = 0;
-      this.generation++;
     }
     if (!url) return;
     if (this.mode === "websocket" && this.running) {
@@ -281,17 +295,21 @@ class RelayConnection {
     this.running = true;
     try {
       if (this.mode === "unknown") {
-        this.mode = await relayCapability(url, this.deps.fetcher);
-        if (this.mode === "legacy") {
+        const mode = await relayCapability(url, this.deps.fetcher);
+        if (generation !== this.generation) return;
+        this.mode = mode;
+        if (mode === "legacy") {
           this.running = false;
           await this.tick(url);
           return;
         }
       }
       const repos = sessionRepos ?? await (this.deps.repos ?? trackedRepos)();
+      if (generation !== this.generation) return;
       this.repoSignature = [...new Set(repos)].sort().join("\n");
       if (repos.length === 0) return;
       const token = await (this.deps.token ?? ghToken)();
+      if (generation !== this.generation) return;
       const session = await createRelaySession(url, token, repos, this.deps.fetcher);
       if (generation !== this.generation) return;
       const createSocket = this.deps.socket ?? ((target: string) => new WebSocket(target));
@@ -306,6 +324,7 @@ class RelayConnection {
           this.reconnectAttempt = 0;
           this.deps.onOpen?.();
         },
+        expectedClose: () => generation !== this.generation,
       });
     } catch (error) {
       if (generation !== this.generation) return;

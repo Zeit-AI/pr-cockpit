@@ -14,7 +14,6 @@ import {
   getMergedPrAnalyticsCache,
   upsertMergedPrAnalyticsCache,
   lastWebhookAtForPr,
-  latestRescoreForHead,
   listArchivedKeys,
   listClosedPrs,
   listPrIndex,
@@ -115,7 +114,6 @@ import {
   listFixerAgents,
   type AgentRow,
 } from "./agents.ts";
-import { defaultRescorePrompt, effectiveRescoreScore, maybeRescore, shouldAutoRescore } from "./rescorer.ts";
 import { isUpdateAvailable, runningRev, updatesEnabled } from "./version.ts";
 import { spawn } from "node:child_process";
 import { repoUsersCached } from "./repoUsers.ts";
@@ -130,6 +128,8 @@ import type { TmuxFocusHandler } from "./tmuxFocus.ts";
 import { needsMeRank } from "./rank.ts";
 import { invalidateInbox, invalidatePr } from "./rendererInvalidation.ts";
 import { actionJobLog, actionWorkflowGraphs, activateActionsLease, cacheActionsRun, cacheGithubActionsForCommit, cacheRepoActionsRunJobs, cachedJobLogs, formatJobLogs, formatRunJobs, refreshWorkflowRuns, repoActionWorkflowGraphs, type CompactStep } from "./runLogs.ts";
+import { claimNotifications } from "./notifications.ts";
+import type { NotificationSettings } from "../shared/notificationRules.ts";
 const cockpitRoot = process.cwd();
 
 function json(data: unknown, status = 200): Response {
@@ -137,6 +137,32 @@ function json(data: unknown, status = 200): Response {
     status,
     headers: { "content-type": "application/json" },
   });
+}
+
+function githubErrorResponse(error: unknown, message = "GitHub request failed"): Response {
+  if (!(error instanceof GithubRequestError)) return json({ error: message }, 502);
+  const response = json({
+    error: error.status === 404 ? "GitHub resource not found or inaccessible" : error.message,
+    kind: error.kind,
+    ...(error.resetAt ? { resetAt: error.resetAt } : {}),
+  }, error.status);
+  if (error.resetAt) {
+    response.headers.set("retry-after", String(Math.max(0, Math.ceil((Date.parse(error.resetAt) - Date.now()) / 1_000))));
+  }
+  return response;
+}
+
+function mirrorErrorResponse(repo: string, error: unknown): Response {
+  if (error instanceof MirrorFetchError && error.kind === "deadline") {
+    void fetchMirror(repo).catch((failure) => console.error(`background mirror fetch failed for ${repo}:`, failure));
+    const response = json({ error: "Git mirror is still loading", building: true }, 503);
+    response.headers.set("retry-after", "5");
+    return response;
+  }
+  console.error(`mirror fetch failed for ${repo}:`, error);
+  return json({
+    error: error instanceof MirrorFetchError ? error.message : "Git mirror fetch failed",
+  }, error instanceof MirrorFetchError && error.kind === "network" ? 503 : 502);
 }
 
 function localBranchFor(repo: string): string | null {
@@ -285,12 +311,10 @@ async function handleInbox(url: URL): Promise<Response> {
 
   const rows = prs.map((pr) => {
     const greptileStatus = greptileScoreStatus(pr);
-    const rescore = pr.greptile_confidence != null ? latestRescoreForHead(pr.repo, pr.number, pr.head_sha) : null;
-    const rescoreScore = rescore && pr.greptile_confidence != null ? effectiveRescoreScore(pr.greptile_confidence, rescore.score) : null;
     const detail = JSON.parse(pr.detail_json);
     const hasReviewShape = Array.isArray(detail.reviews?.nodes) && Array.isArray(detail.comments?.nodes) && Array.isArray(detail.reviewRequests?.nodes);
     const perReviewer = hasReviewShape ? currentReviewerScores(detail) : {};
-    const reviewScore = aggregateReviewScore(perReviewer, rescoreScore ?? pr.greptile_confidence);
+    const reviewScore = aggregateReviewScore(perReviewer, pr.greptile_confidence);
     const reviewScoreStale = aggregateReviewStale(perReviewer, reviewScore);
     const stats = statsExcludingTests(pr, detail, testRe);
     return {
@@ -321,7 +345,6 @@ async function handleInbox(url: URL): Promise<Response> {
       needsMeRank: pr.needs_me_rank,
       greptileConfidence: pr.greptile_confidence,
       greptileStatus,
-      greptileRescore: rescore && rescoreScore != null ? { score: rescoreScore, reviewedSha: rescore.review_sha } : null,
       reviewScore,
       reviewScoreStale,
       windowId: worktreeWindowIdFor(pr.repo, pr.head_ref),
@@ -503,8 +526,7 @@ async function handleMergedPrAnalytics(url: URL, runtime: HttpRuntime): Promise<
   try {
     return json(windowedMergedPrAnalytics(await refreshMergedPrAnalytics(repo, base, runtime), cappedDays));
   } catch (err) {
-    const status = err instanceof GithubRequestError ? err.status : 502;
-    return json({ error: status === 404 ? "not found" : "GitHub fetch failed" }, status);
+    return githubErrorResponse(err);
   }
 }
 
@@ -546,8 +568,7 @@ async function handleAllPrs(url: URL, runtime: HttpRuntime): Promise<Response> {
     );
     return json({ prs });
   } catch (err) {
-    const status = err instanceof GithubRequestError ? err.status : 502;
-    return json({ error: status === 404 ? "Repository not found" : "GitHub fetch failed" }, status);
+    return githubErrorResponse(err);
   }
 }
 
@@ -640,6 +661,7 @@ function withBaseBranchPr(
   const headRef = detail.headRefName;
   return {
     ...detail,
+    reviewerScores: currentReviewerScores(detail),
     baseBranchPrNumber: basePr && basePr.number !== num ? basePr.number : null,
     worktreePath: headRef ? worktreePathFor(repoName, headRef) : null,
     windowId: headRef ? worktreeWindowIdFor(repoName, headRef) : null,
@@ -651,14 +673,7 @@ function withBaseBranchPr(
 }
 
 function trackedPrDetail(repoName: string, num: number, tracked: PrRow): Record<string, unknown> {
-  const rescore = latestRescoreForHead(repoName, num, tracked.head_sha);
-  const rescoreScore = rescore && tracked.greptile_confidence != null ? effectiveRescoreScore(tracked.greptile_confidence, rescore.score) : null;
-  const detail = JSON.parse(tracked.detail_json);
-  return {
-    ...withBaseBranchPr(repoName, num, detail),
-    greptileRescore: rescore && rescoreScore != null ? { score: rescoreScore, reviewedSha: rescore.review_sha } : null,
-    reviewerScores: currentReviewerScores(detail),
-  };
+  return withBaseBranchPr(repoName, num, JSON.parse(tracked.detail_json));
 }
 
 type AgentSnapshotStatus = {
@@ -754,8 +769,7 @@ async function handlePrDetail(
     return json(agentRead ? { ...response, agentSnapshot: snapshotStatus(snapshotCutoffAt, lastWebhookAtForPr(repoName, num)) } : response);
   } catch (err) {
     console.error(`detail fetch failed for ${repoName}#${num}:`, err);
-    const status = err instanceof GithubRequestError ? err.status : 502;
-    return json({ error: status === 404 ? "not found" : "GitHub fetch failed" }, status);
+    return githubErrorResponse(err);
   }
 }
 
@@ -1080,8 +1094,7 @@ async function handleAgentPr(
       commentsSince = await runtime.fetchPrCommentsSince(`${owner}/${repo}`, Number(number), newCommentsSince);
     } catch (err) {
       console.error(`GitHub comments fetch failed for ${owner}/${repo}#${number}:`, err);
-      const status = err instanceof GithubRequestError ? err.status : 502;
-      return json({ error: "GitHub comments fetch failed" }, status);
+      return githubErrorResponse(err, "GitHub comments fetch failed");
     }
   }
   const detailResponse = await handlePrDetail(owner, repo, number, runtime, true);
@@ -1308,8 +1321,7 @@ async function handleResolveReviewThread(
   try {
     await runtime.resolveReviewThread(thread.id);
   } catch (err) {
-    const status = err instanceof GithubRequestError ? err.status : 502;
-    return json({ error: err instanceof Error ? err.message : "GitHub thread resolution failed" }, status);
+    return githubErrorResponse(err, "GitHub thread resolution failed");
   }
   try {
     if (getPr(repoName, num)) {
@@ -1348,8 +1360,7 @@ async function handlePrConflicts(owner: string, repo: string, number: string): P
   try {
     await fetchMirror(repoName, INCREMENTAL_FETCH_TIMEOUT_MS);
   } catch (err) {
-    console.error(`conflict file fetch failed for ${repoName}#${num}:`, err);
-    return json({ error: "Conflict files are still loading" }, 503);
+    return mirrorErrorResponse(repoName, err);
   }
 
   const result = await conflictFilesFromMirror(repoName, `refs/heads/${ctx.baseRef}`, ctx.headSha);
@@ -1385,8 +1396,7 @@ async function handlePrCommitStats(owner: string, repo: string, number: string, 
       await fetchMirror(repoName, INCREMENTAL_FETCH_TIMEOUT_MS);
       result = await commitStatsFromMirror(repoName, ctx.baseSha, ctx.headSha);
     } catch (err) {
-      console.error(`commit stats mirror fetch failed for ${repoName}#${num}:`, err);
-      return json({ commits: {} });
+      return mirrorErrorResponse(repoName, err);
     }
   }
   if (result.status !== "ok") return json({ commits: {} });
@@ -1416,17 +1426,7 @@ async function handlePrDiff(owner: string, repo: string, number: string, url: UR
         await fetchMirror(repoName, INCREMENTAL_FETCH_TIMEOUT_MS);
         result = await diffFromMirror(repoName, base, head, "two-dot");
       } catch (err) {
-        console.error(`incremental mirror fetch failed for ${repoName}:`, err);
-        if (err instanceof MirrorFetchError && !err.timedOut) {
-          // fast, non-timeout failure (bad auth, repo 404, ...) - not a "come back later" case
-          return new Response("mirror fetch failed", { status: 502 });
-        }
-        // fetch timed out or stalled - retry it unbounded in the background, tell the client to come back
-        fetchMirror(repoName).catch((bgErr) => console.error(`background mirror fetch failed for ${repoName}:`, bgErr));
-        return new Response(JSON.stringify({ building: true }), {
-          status: 503,
-          headers: { "content-type": "application/json", "retry-after": "5" },
-        });
+        return mirrorErrorResponse(repoName, err);
       }
     }
     if (result.status === "ok") {
@@ -1463,15 +1463,7 @@ async function handlePrDiff(owner: string, repo: string, number: string, url: UR
         await fetchMirror(repoName, INCREMENTAL_FETCH_TIMEOUT_MS);
         mirrored = await diffFromMirror(repoName, baseCommit, diffHead, "three-dot");
       } catch (err) {
-        console.error(`incremental mirror fetch failed for ${repoName}#${num}:`, err);
-        if (err instanceof MirrorFetchError && !err.timedOut) {
-          return new Response("mirror fetch failed", { status: 502 });
-        }
-        fetchMirror(repoName).catch((bgErr) => console.error(`background mirror fetch failed for ${repoName}:`, bgErr));
-        return new Response(JSON.stringify({ building: true }), {
-          status: 503,
-          headers: { "content-type": "application/json", "retry-after": "5" },
-        });
+        return mirrorErrorResponse(repoName, err);
       }
     }
     if (mirrored.status === "ok") {
@@ -1494,8 +1486,8 @@ async function handlePrDiff(owner: string, repo: string, number: string, url: UR
       : await fetchDiff(repoName, num);
     if (diffKey) saveDiff(diffKey, patch);
     return new Response(patch, { headers: { "content-type": "text/x-diff" } });
-  } catch {
-    return new Response("not found", { status: 404 });
+  } catch (error) {
+    return githubErrorResponse(error, "GitHub diff fetch failed");
   }
 }
 
@@ -1546,8 +1538,7 @@ async function mirroredActionCommits(context: CachedActionsContext) {
       await fetchMirror(context.repoName, INCREMENTAL_FETCH_TIMEOUT_MS);
       result = await commitsFromMirror(context.repoName, context.baseSha, context.currentHeadSha);
     } catch (error) {
-      console.error(`Actions commit fetch failed for ${context.repoName}#${context.num}:`, error);
-      return null;
+      return mirrorErrorResponse(context.repoName, error);
     }
   }
   return result.status === "ok" ? result.commits : null;
@@ -1567,6 +1558,7 @@ async function selectedActionsContext(
   if (context.commits.some((commit) => commit.sha === requested)) return { ...context, headSha: requested };
   if (!isMockGithub) {
     const commits = await mirroredActionCommits(context);
+    if (commits instanceof Response) return commits;
     if (commits?.some((commit) => commit.sha === requested)) return { ...context, headSha: requested };
   }
   return json({ error: "commit is not part of this pull request" }, 400);
@@ -1577,6 +1569,7 @@ async function handleActionCommits(owner: string, repo: string, number: string):
   if (context instanceof Response) return context;
   if (isMockGithub) return json({ headSha: context.currentHeadSha, commits: context.commits });
   const commits = await mirroredActionCommits(context);
+  if (commits instanceof Response) return commits;
   if (!commits) return json({ error: "Pull request commits are still loading" }, 503);
   return json({ headSha: context.currentHeadSha, commits });
 }
@@ -2057,13 +2050,7 @@ async function handleAgentPrFile(owner: string, repo: string, number: string, ur
       await fetchMirror(repoName, INCREMENTAL_FETCH_TIMEOUT_MS);
       result = await fileFromMirror(repoName, ctx.headSha, path);
     } catch (err) {
-      console.error(`incremental mirror fetch failed for ${repoName}#${num}:`, err);
-      if (err instanceof MirrorFetchError && !err.timedOut) return json({ error: "mirror fetch failed" }, 502);
-      fetchMirror(repoName).catch((bgErr) => console.error(`background mirror fetch failed for ${repoName}:`, bgErr));
-      return new Response(JSON.stringify({ building: true }), {
-        status: 503,
-        headers: { "content-type": "application/json", "retry-after": "5" },
-      });
+      return mirrorErrorResponse(repoName, err);
     }
   }
   if (result.status === "ok") {
@@ -2106,8 +2093,8 @@ async function handleFile(url: URL): Promise<Response> {
     if ("tooLarge" in result) return json({ tooLarge: true });
     saveFileContents(sha, path, result.content);
     return json({ content: result.content });
-  } catch {
-    return json({ error: "not found" }, 404);
+  } catch (error) {
+    return githubErrorResponse(error, "GitHub file fetch failed");
   }
 }
 
@@ -2487,6 +2474,7 @@ async function handlePutSettings(req: Request): Promise<Response> {
     keybind_open_palette: string;
     agent_harness: string;
     relay_url: string;
+    notifications: NotificationSettings;
   }>;
   try {
     body = (await req.json()) as typeof body;
@@ -2509,7 +2497,6 @@ async function handlePutSettings(req: Request): Promise<Response> {
 const AGENT_PROMPT_DEFAULTS: Record<string, () => string> = {
   fixer: defaultFixerTemplate,
   autofix: defaultAutofixTemplate,
-  rescorer: defaultRescorePrompt,
 };
 
 function withAgentPromptDefaults(settings: Settings) {
@@ -2822,7 +2809,7 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
     }),
   };
   const webhookRoute = buildWebhookRoutes();
-  return async function fetchHandler(req: Request): Promise<Response> {
+  async function route(req: Request): Promise<Response> {
     const url = new URL(req.url);
     const parts = url.pathname.split("/").filter(Boolean);
     if (isMockGithub && url.pathname === "/api/image") {
@@ -2833,6 +2820,7 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
         || (req.method === "POST" && url.pathname === "/api/commit-message")
         || (req.method === "POST" && url.pathname === "/api/auth/setup")
         || (req.method === "PUT" && url.pathname === "/api/settings")
+        || (req.method === "POST" && url.pathname === "/api/notifications/claim")
         || (req.method === "POST" && parts.length === 6 && parts[0] === "api" && parts[1] === "pr" && parts[5] === "merge-method")
         || (
           req.method === "POST" && parts.length === 7 &&
@@ -2855,6 +2843,9 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
     }
     if (req.method === "GET" && url.pathname === "/api/replica/status") {
       return json(replicaStatus());
+    }
+    if (req.method === "POST" && url.pathname === "/api/notifications/claim") {
+      return json({ notifications: claimNotifications() });
     }
     const replicaResponse = await proxyReplicaRequest(req, url);
     if (replicaResponse) return replicaResponse;
@@ -3072,18 +3063,6 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
       }
       return json({ ok: true });
     }
-    if (req.method === "POST" && url.pathname === "/api/agents/rescore") {
-      const body = (await req.json()) as { repo: string; number: number };
-      if (!/^[^/]+\/[^/]+$/.test(body.repo ?? "") || !Number.isInteger(body.number)) {
-        return json({ error: "invalid repo/number" }, 400);
-      }
-      const pr = getPr(body.repo, body.number);
-      if (!pr || !shouldAutoRescore(pr)) {
-        return json({ error: "nothing to re-score - needs your own PR with a stale Greptile review" }, 409);
-      }
-      maybeRescore(body.repo, body.number).catch((err) => console.error(`manual rescore failed for ${body.repo}#${body.number}:`, err));
-      return json({ ok: true });
-    }
     if (req.method === "POST" && url.pathname === "/api/agents/kill") {
       const body = (await req.json()) as { repo: string; number: number };
       if (!/^[^/]+\/[^/]+$/.test(body.repo ?? "") || !Number.isInteger(body.number)) {
@@ -3289,6 +3268,7 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
         return json(await checkoutTargetFor(checkout, url.searchParams.get("file")));
       } catch (err) {
         if (err instanceof CheckoutTargetError) return json({ error: err.message }, err.status);
+        if (err instanceof MirrorFetchError) return mirrorErrorResponse(repoName, err);
         return json({ error: err instanceof Error ? err.message : String(err) }, 502);
       }
     }
@@ -3307,5 +3287,14 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
     }
 
     return new Response("not found", { status: 404 });
+  }
+  return async function fetchHandler(req: Request): Promise<Response> {
+    try {
+      return await route(req);
+    } catch (error) {
+      if (!(error instanceof GithubRequestError)) throw error;
+      console.error("GitHub request failed:", error);
+      return githubErrorResponse(error);
+    }
   };
 }

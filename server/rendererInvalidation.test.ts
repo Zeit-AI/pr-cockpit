@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import { startCockpitServer } from "./cockpitServer.ts";
 import {
   invalidateInbox,
+  invalidateNotificationSettings,
+  invalidateNotifications,
   invalidatePr,
   publishPollCompleted,
   setRendererInvalidationPublisher,
@@ -24,7 +26,7 @@ test("renderer origins must be exact HTTP or HTTPS origins", () => {
   );
 });
 
-test("renderer event socket publishes poll, PR, and inbox invalidations after backend changes", async () => {
+test("renderer event socket publishes backend invalidations", async () => {
   const externalOrigin = "https://cockpit.example.net";
   let mutateCalls = 0;
   const server = startCockpitServer(0, (request) => {
@@ -34,6 +36,8 @@ test("renderer event socket publishes poll, PR, and inbox invalidations after ba
       publishPollCompleted("2026-08-21T14:02:37.671Z");
       invalidatePr("microsoft/vscode", 331792);
       invalidateInbox();
+      invalidateNotifications();
+      invalidateNotificationSettings();
       return Response.json({ ok: true });
     }
     return new Response("Not found", { status: 404 });
@@ -75,7 +79,7 @@ test("renderer event socket publishes poll, PR, and inbox invalidations after ba
     const events: unknown[] = [];
     socket.addEventListener("message", (message) => {
       events.push(JSON.parse(String(message.data)));
-      if (events.length === 3) resolveEvents(events);
+      if (events.length === 5) resolveEvents(events);
     });
 
     expect((await fetch(`${baseUrl}/mutate`, { method: "POST" })).ok).toBe(true);
@@ -83,6 +87,8 @@ test("renderer event socket publishes poll, PR, and inbox invalidations after ba
       { type: "poll-complete", lastPollAt: "2026-08-21T14:02:37.671Z" },
       { type: "pr", repo: "microsoft/vscode", number: 331792 },
       { type: "inbox" },
+      { type: "notifications" },
+      { type: "notification-settings" },
     ]);
   } finally {
     socket?.close();

@@ -28,7 +28,7 @@ const restPullRequest = {
   merged_at: "2026-08-27T10:00:00Z",
   closed_at: "2026-08-27T10:00:00Z",
   draft: false,
-  user: { node_id: "U_node", login: "octocat", avatar_url: "https://avatars.example/octocat" },
+  user: { node_id: "U_node", login: "octocat", avatar_url: "https://avatars.example/octocat", type: "User" },
   base: { ref: "main", sha: "base-sha" },
   head: { ref: "rest-detail", sha: "head-sha" },
   body: "Body",
@@ -44,7 +44,7 @@ const restPullRequest = {
   commits: 3,
   labels: [{ name: "bug" }],
   assignees: [{ login: "owner" }],
-  requested_reviewers: [{ node_id: "U_reviewer", login: "reviewer", avatar_url: "https://avatars.example/reviewer" }],
+  requested_reviewers: [{ node_id: "U_reviewer", login: "reviewer", avatar_url: "https://avatars.example/reviewer", type: "User" }],
   requested_teams: [{ name: "platform" }],
 };
 
@@ -87,7 +87,7 @@ describe("REST PR detail parity", () => {
       mergedAt: "2026-08-27T10:00:00Z",
       closedAt: "2026-08-27T10:00:00Z",
       isDraft: false,
-      author: { login: "octocat", avatarUrl: "https://avatars.example/octocat" },
+      author: { __typename: "User", login: "octocat", avatarUrl: "https://avatars.example/octocat" },
       baseRefName: "main",
       baseRefOid: "base-sha",
       headRefName: "rest-detail",
@@ -125,6 +125,14 @@ describe("REST PR detail parity", () => {
         ],
       },
     });
+  });
+
+  test("preserves REST bot actor type", () => {
+    const mapped = mapRestPrDetailBase({
+      ...restPullRequest,
+      user: { ...restPullRequest.user, type: "Bot" },
+    }, []);
+    expect(mapped.author?.__typename).toBe("Bot");
   });
 
   test("preserves GraphQL null and enum semantics", () => {
@@ -271,7 +279,7 @@ describe("REST PR detail parity", () => {
         state: "MERGED",
       }]);
       expect((await searchRecentPrs("acme/repo"))[0]?.state).toBe("MERGED");
-      expect((await searchClosedPrs(["acme/repo"]))[0]?.involvesMe).toBe(true);
+      expect((await searchClosedPrs(["acme/repo"])).items[0]?.involvesMe).toBe(true);
       expect(await postIssueComment("acme/repo", 42, "Accepted comment")).toBe("IC_comment-node");
       await addAssignees("acme/repo", 42, ["owner"]);
       await updatePullRequestBranch("acme/repo", 42);

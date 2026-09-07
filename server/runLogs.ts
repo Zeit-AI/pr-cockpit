@@ -414,12 +414,19 @@ export async function refreshRecentActions(
   runFetcher: typeof fetchRecentWorkflowRuns = fetchRecentWorkflowRuns,
   workflowFetcher: typeof fetchActionWorkflows = fetchActionWorkflows,
 ): Promise<number> {
-  const [runs, workflows] = await Promise.all([runFetcher(repo), workflowFetcher(repo)]);
-  replaceActionWorkflows(repo, workflows);
+  const [runsResult, workflowsResult] = await Promise.allSettled([runFetcher(repo), workflowFetcher(repo)]);
   let changed = 0;
-  for (const raw of runs) {
-    if (storeRun(repo, null, compactRun(raw))) changed++;
+  if (runsResult.status === "fulfilled") {
+    for (const raw of runsResult.value) {
+      if (storeRun(repo, null, compactRun(raw))) changed++;
+    }
   }
+  if (workflowsResult.status === "fulfilled") replaceActionWorkflows(repo, workflowsResult.value);
+  const failures = [runsResult, workflowsResult]
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, `GitHub Actions refresh failed for ${repo}`);
   return changed;
 }
 

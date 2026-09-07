@@ -59,8 +59,12 @@ test("a local server imports inbox state and proxies GitHub-backed APIs through 
     expect(sourceSnapshotResponse.status).toBe(200);
     const etag = sourceSnapshotResponse.headers.get("etag");
     expect(etag).toMatch(/^"[0-9a-f]+"$/);
-    const sourceSnapshot = await sourceSnapshotResponse.json() as { tables: { prs: unknown[] } };
+    const sourceSnapshot = await sourceSnapshotResponse.json() as { tables: Record<string, unknown[]> };
     expect(sourceSnapshot.tables.prs.length).toBeGreaterThan(0);
+    expect(sourceSnapshot.tables).not.toHaveProperty("review_scores");
+    expect(sourceSnapshot.tables).not.toHaveProperty("review_rescores");
+    expect(sourceSnapshot.tables).not.toHaveProperty("desktop_notifications");
+    expect(sourceSnapshot.tables).not.toHaveProperty("settings");
     expect((await fetch(`http://127.0.0.1:${sourcePort}/api/replica/inbox`, {
       headers: { "if-none-match": etag! },
     })).status).toBe(304);
@@ -105,7 +109,6 @@ test("a local server imports inbox state and proxies GitHub-backed APIs through 
     expect(replicaAllPrs.status).toBe(200);
     expect(await replicaAllPrs.json()).toEqual(await sourceAllPrs.json());
     source.kill();
-    await source.exited;
     const offlineInbox = await fetch(`http://127.0.0.1:${replicaPort}/api/inbox`).then((response) => response.json());
     expect(offlineInbox).toEqual(replicaInbox);
     const offlineAllPrs = await fetch(`http://127.0.0.1:${replicaPort}${allPrsPath}`);

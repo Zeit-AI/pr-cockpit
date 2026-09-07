@@ -9,6 +9,9 @@
   import ShortcutInput from "./ShortcutInput.svelte";
   import Kbd from "./Kbd.svelte";
   import SettingsAnalytics from "./SettingsAnalytics.svelte";
+  import SettingsNotifications from "./SettingsNotifications.svelte";
+  import { notificationRuleIssues, serializeNotificationSettings } from "./notificationEditor.js";
+  import { defaultNotificationSettings } from "../../../shared/notificationRules.ts";
   import { SETTINGS_SECTION_KEY, SETTINGS_SECTIONS, normalizeSettingsSection, settingsSectionHref } from "./settingsSections.js";
   import { desktopShortcutDefaults, shortcutsClash } from "./shortcutPlatform.js";
   import { tailscaleAccess } from "./tailscaleAccess.js";
@@ -42,6 +45,7 @@
   let relayUrl = $state("");
   let desktopPlatform = $state("darwin");
   let replicaSshHost = $state("");
+  let notifications = $state(defaultNotificationSettings());
   let relayInfo = $state(null);
   let relayCoverage = $state(null);
   let health = $state(null);
@@ -53,6 +57,7 @@
   let activeTab = $derived(normalizeSettingsSection(section));
   let activeSection = $derived(SETTINGS_SECTIONS.find((item) => item.id === activeTab));
   let privateAccess = $derived(tailscaleAccess(health));
+  let notificationIssues = $derived(notificationRuleIssues(notifications.rules));
 
   $effect(() => localStorage.setItem(SETTINGS_SECTION_KEY, activeTab));
 
@@ -67,11 +72,6 @@
       description: "Fixes conflicts, failing checks and review threads, but never merges. You decide when to merge.",
       offHint: "Turning this off prevents new runs. A running auto-fix finishes its current pass, then exits. Re-arm the PR after re-enabling.",
       promptHint: "Placeholders such as {{PR_NUMBER}} are filled in for each run.",
-    },
-    rescorer: {
-      description: "Re-scores Greptile’s review after new commits land on your own PRs. It never posts a comment.",
-      offHint: "Turning this off prevents new re-scores.",
-      promptHint: "Customize the review persona here. Findings, the diff and the required score format are added automatically; {{REPO}} and {{NUMBER}} are filled in for each run.",
     },
   };
 
@@ -99,6 +99,7 @@
     }
     return issues;
   });
+  let saveBlocked = $derived(keybindClash || agentKeybindIssues.size > 0 || notificationIssues.size > 0);
 
   function addAgent() {
     agents = [...agents, { id: `custom-${crypto.randomUUID().slice(0, 8)}`, name: "", enabled: true, trigger: "keybind", keybind: "", model: "opus", prompt_template: "", prompt_default: "", promptText: "" }];
@@ -146,6 +147,7 @@
     relayUrl = s.relay_url;
     testPathRegex = s.test_path_regex || BUILTIN_TEST_PATH.source;
     health = s.tailscale_serve ? { tailscaleServe: s.tailscale_serve } : null;
+    notifications = s.notifications ?? defaultNotificationSettings();
   }
 
   let relayOrg = $derived(configuredRepos[0]?.split("/")[0] ?? "");
@@ -205,7 +207,7 @@
   });
 
   async function save() {
-    if (!loaded || saving || keybindClash || agentKeybindIssues.size) return;
+    if (!loaded || saving || saveBlocked) return;
     saving = true;
     saved = false;
     error = null;
@@ -244,6 +246,7 @@
         keybind_open_app: keybindOpenApp,
         keybind_open_palette: keybindOpenPalette,
         relay_url: relayUrl.trim(),
+        notifications: serializeNotificationSettings(notifications),
       });
       apply(next);
       setTheme(themeName);
@@ -712,6 +715,10 @@
         </label>
       {/if}
 
+      {#if activeTab === "notifications"}
+        <SettingsNotifications bind:settings={notifications} issues={notificationIssues} />
+      {/if}
+
       {#if activeTab === "analytics"}
         <SettingsAnalytics repos={configuredRepos} />
       {/if}
@@ -724,6 +731,8 @@
             <span class="invalid-hint">Choose different shortcuts in <a href={settingsSectionHref("keybinds")}>Keyboard shortcuts</a> before saving.</span>
           {:else if agentKeybindIssues.size}
             <span class="invalid-hint">Resolve shortcut conflicts in <a href={settingsSectionHref("automerge")}>Agents &amp; merging</a> before saving.</span>
+          {:else if notificationIssues.size}
+            <span class="invalid-hint">Complete or remove incomplete rules in <a href={settingsSectionHref("notifications")}>Notifications</a> before saving.</span>
           {:else if error}
             <span class="invalid-hint">Could not save: {error}. Your edits are kept. Resolve the error and try again.</span>
           {:else if saved}
@@ -732,9 +741,9 @@
             <span class="hint">Save applies your changes across Settings.</span>
           {/if}
         </div>
-        <button class="btn" type="button" disabled={saving || keybindClash || agentKeybindIssues.size > 0} onclick={save}>
+        <button class="btn" type="button" disabled={saving || saveBlocked} onclick={save}>
           {saving ? "Saving…" : "Save changes"}
-          {#if !saving && !keybindClash && agentKeybindIssues.size === 0}<Kbd keys={["cmd", "s"]} />{/if}
+          {#if !saving && !saveBlocked}<Kbd keys={["cmd", "s"]} />{/if}
         </button>
       </div>
       {/if}

@@ -22,9 +22,9 @@ import { createPrRefreshScheduler } from "./refreshScheduler.ts";
 import { pollIntervalMs, settingsRepos } from "./settings.ts";
 import { discoveredRepos, refreshWorktreeScan } from "./worktreeScan.ts";
 import { onPrActivity } from "./activity.ts";
-import { scoreReviewers } from "./reviewScore.ts";
 import { invalidateInbox, invalidatePr, publishPollCompleted } from "./rendererInvalidation.ts";
 import { refreshRecentActions } from "./runLogs.ts";
+import { observePrNotifications } from "./notifications.ts";
 import { GRAPHQL_BACKGROUND_RESERVE } from "../ui/src/lib/quotaImpact.js";
 
 const INDEX_SWEEP_MS = 1_800_000;
@@ -128,7 +128,6 @@ async function refreshPrNow(
     fetchMirror(repo).catch((err) => console.error(`mirror fetch failed for ${repo}:`, err));
     onPrActivity(repo, number, previous !== null);
   }
-  scoreReviewers(repo, number, detail);
   const ciStatus = checkRollupStatus(detail);
   const unresolvedCount = countUnresolved(detail);
   const rank = needsMeRank({
@@ -139,7 +138,7 @@ async function refreshPrNow(
     isDraft: detail.isDraft,
   });
 
-  upsertPr({
+  const next: PrRow = {
     repo,
     number,
     state: detail.isDraft ? "draft" : detail.state,
@@ -170,7 +169,9 @@ async function refreshPrNow(
     greptile_unresolved_count: greptileUnresolvedCount(detail),
     detail_json: JSON.stringify(detail),
     fetched_at: snapshotCutoffAt,
-  });
+  };
+  upsertPr(next);
+  observePrNotifications(previous, next);
 
   upsertPrIndex([{
     repo,
@@ -309,7 +310,10 @@ export function createPollOnce(deps: PollDeps): () => Promise<{ checked: number;
     if (lastIndexSweepAt !== null && Date.now() - lastIndexSweepAt < INDEX_SWEEP_MS) return;
     const sweeps = await Promise.allSettled([
       ...repos.map((repo) => deps.searchRecentPrs(repo)),
-      deps.searchClosedPrs(repos),
+      deps.searchClosedPrs(repos).then(({ items, failures }) => {
+        for (const failure of failures) console.error(`closed PR search failed for ${failure.repo}:`, failure.error);
+        return items;
+      }),
     ]);
     let changed = false;
     for (const sweep of sweeps) {

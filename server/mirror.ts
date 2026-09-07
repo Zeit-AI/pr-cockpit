@@ -63,10 +63,28 @@ async function authedGit(args: string[], timeoutMs?: number): Promise<{ ok: bool
   return { ok: !timedOut && exitCode === 0, stdout, stderr, timedOut };
 }
 
+export type MirrorFetchFailureKind = "credentials" | "network" | "deadline" | "git";
+
 export class MirrorFetchError extends Error {
-  constructor(message: string, readonly timedOut: boolean) {
+  constructor(message: string, readonly kind: MirrorFetchFailureKind) {
     super(message);
   }
+}
+
+function mirrorFetchError(operation: "clone" | "fetch", repo: string, result: { stderr: string; timedOut: boolean }): MirrorFetchError {
+  if (result.timedOut) return new MirrorFetchError(`mirror ${operation} deadline exceeded for ${repo}`, "deadline");
+  if (/Invalid username or password|Invalid username or token|Authentication failed/i.test(result.stderr)) {
+    return new MirrorFetchError(`GitHub rejected mirror credentials for ${repo}`, "credentials");
+  }
+  const detail = result.stderr
+    .trim()
+    .replace(/https:\/\/[^/@\s]+@/g, "https://[redacted]@")
+    .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+\b/g, "[redacted]")
+    .slice(0, 1024);
+  const kind = /Could not resolve host|Failed to connect|Connection (?:timed out|reset)|network is unreachable|TLS connection|SSL_connect|remote end hung up|early EOF/i.test(result.stderr)
+    ? "network"
+    : "git";
+  return new MirrorFetchError(`mirror ${operation} failed for ${repo}${detail ? `: ${detail}` : ""}`, kind);
 }
 
 const FETCH_REFSPECS = ["+refs/heads/*:refs/heads/*", "+refs/pull/*/head:refs/remotes/origin/pr/*"];
@@ -76,7 +94,7 @@ async function ensureMirror(repo: string, timeoutMs?: number): Promise<void> {
   if (await Bun.file(`${dir}/HEAD`).exists()) return;
   mkdirSync(mirrorsRoot, { recursive: true });
   const clone = await authedGit(["clone", "--bare", `https://github.com/${repo}.git`, dir], timeoutMs);
-  if (!clone.ok) throw new MirrorFetchError(`mirror clone failed for ${repo}: ${clone.stderr}`, clone.timedOut);
+  if (!clone.ok) throw mirrorFetchError("clone", repo, clone);
 }
 
 const inFlightFetch = new Map<string, Promise<void>>();
@@ -94,7 +112,7 @@ export const INCREMENTAL_FETCH_TIMEOUT_MS = 15_000;
 
 function dedupWaitTimeout(ms: number): Promise<never> {
   return new Promise((_, reject) => {
-    setTimeout(() => reject(new MirrorFetchError(`mirror fetch dedup wait exceeded ${ms}ms`, true)), ms);
+    setTimeout(() => reject(new MirrorFetchError(`mirror fetch dedup wait exceeded ${ms}ms`, "deadline")), ms);
   });
 }
 
@@ -109,7 +127,7 @@ export function fetchMirror(repo: string, timeoutMs?: number): Promise<void> {
     await ensureMirror(repo, timeoutMs);
     const dir = mirrorDir(repo);
     const result = await authedGit(["--git-dir", dir, "fetch", "--prune", "origin", ...FETCH_REFSPECS], timeoutMs);
-    if (!result.ok) throw new MirrorFetchError(`mirror fetch failed for ${repo}: ${result.stderr}`, result.timedOut);
+    if (!result.ok) throw mirrorFetchError("fetch", repo, result);
   })().finally(() => inFlightFetch.delete(repo));
   inFlightFetch.set(repo, promise);
   return promise;
@@ -137,11 +155,7 @@ export function materializePrWorktree(repo: string, number: number, sha: string)
   const promise = (async () => {
     const gitDir = mirrorDir(repo);
     if (!(await commitExists(gitDir, sha))) {
-      try {
-        await fetchMirror(repo, INCREMENTAL_FETCH_TIMEOUT_MS);
-      } catch (err) {
-        throw new Error(`cache fetch failed for ${repo}: ${err instanceof Error ? err.message : String(err)}`);
-      }
+      await fetchMirror(repo, INCREMENTAL_FETCH_TIMEOUT_MS);
     }
     if (!(await commitExists(gitDir, sha))) {
       throw new Error(`cache fetch failed for ${repo}: PR head ${sha} is unavailable`);

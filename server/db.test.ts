@@ -395,3 +395,35 @@ test("startup drops Actions leases because browser presence cannot survive the s
     rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test("startup removes retired generated score tables", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-score-table-migration-"));
+  const databasePath = join(dataDir, "cockpit.db");
+  const scenario = `
+    const { Database } = await import("bun:sqlite");
+    const stored = new Database(${JSON.stringify(databasePath)});
+    stored.exec("CREATE TABLE review_scores (node_id TEXT PRIMARY KEY); CREATE TABLE review_rescores (repo TEXT);");
+    stored.close();
+    const { db } = await import(${JSON.stringify(dbModuleUrl)});
+    const names = db.query("SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('review_scores', 'review_rescores')").all();
+    console.log(JSON.stringify(names));
+    db.close();
+  `;
+
+  try {
+    const process = Bun.spawn([Bun.which("bun") ?? "bun", "-e", scenario], {
+      env: { ...Bun.env, COCKPIT_DATA_DIR: dataDir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    if (exitCode !== 0) throw new Error(stderr);
+    expect(JSON.parse(stdout)).toEqual([]);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});

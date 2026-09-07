@@ -4,7 +4,6 @@ import { cockpitWebhooksEnabled, settingsRepos } from "./settings.ts";
 
 const WEBHOOK_EVENTS =
   "pull_request,pull_request_review,pull_request_review_comment,pull_request_review_thread,issue_comment,check_run,check_suite,status,push,workflow_run,workflow_job";
-const FORWARDING_HOOK_URL = "https://webhook-forwarder.github.com/hook";
 
 interface Forwarder {
   repo: string;
@@ -20,32 +19,13 @@ function log(...args: unknown[]): void {
   console.log(new Date().toISOString(), "[forwarders]", ...args);
 }
 
-async function run(cmd: string[]): Promise<{ ok: boolean; stdout: string; stderr: string }> {
-  try {
-    const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
-    const [stdout, stderr] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
-    const code = await proc.exited;
-    return { ok: code === 0, stdout, stderr };
-  } catch (e) {
-    return { ok: false, stdout: "", stderr: String(e) };
-  }
-}
-
-// unclean `gh webhook forward` exits orphan their repo hook (next run 422s forever); deletion assumes cockpit is the repo's only forwarder
-async function cleanupForwardingHooks(repo: string): Promise<boolean> {
-  const res = await run(["gh", "api", `repos/${repo}/hooks`, "--jq", `.[] | select(.config.url == "${FORWARDING_HOOK_URL}") | .id`]);
-  if (!res.ok) {
-    console.error(`hook cleanup: list failed for ${repo}: ${res.stderr.trim()}`);
-    return false;
-  }
-  let deleted = 0;
-  let failed = 0;
-  for (const id of res.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
-    const del = await run(["gh", "api", "-X", "DELETE", `repos/${repo}/hooks/${id}`]);
-    log(del.ok ? `hook cleanup: deleted stale forwarding hook ${id} on ${repo}` : `hook cleanup: delete ${id} on ${repo} failed: ${del.stderr.trim()}`);
-    del.ok ? deleted++ : failed++;
-  }
-  return deleted > 0 && failed === 0;
+function failureDetail(stderr: string): string {
+  return stderr
+    .trim()
+    .replace(/\b(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+\b/g, "[redacted]")
+    .replace(/(authorization:\s*)[^\r\n]+/gi, "$1[redacted]")
+    .replace(/([?&](?:access_token|token|secret)=)[^&\s]+/gi, "$1[redacted]")
+    .slice(0, 1024);
 }
 
 function spawnForwarder(repo: string, port: number): void {
@@ -56,26 +36,33 @@ function spawnForwarder(repo: string, port: number): void {
     { stdout: "inherit", stderr: "pipe" },
   );
   f.proc = proc;
+  let errHead = "";
   let errTail = "";
   const stderrDrained = (async () => {
     const dec = new TextDecoder();
     for await (const chunk of proc.stderr) {
       const s = dec.decode(chunk);
-      errTail = (errTail + s).slice(-4096);
-      process.stderr.write(s);
+      errHead = (errHead + s).slice(0, 2048);
+      errTail = (errTail + s).slice(-2048);
     }
   })();
   const startedAt = Date.now();
   log(`forwarder up: ${repo} (pid ${proc.pid})`);
   proc.exited.then(async (code) => {
-    console.error(`forwarder ${repo} exited (code=${code})`);
-    if (f.stopped) return;
-    const uptimeMs = Date.now() - startedAt;
-    if (uptimeMs > 60_000) f.backoffMs = 5_000; // healthy run — reset backoff
     await stderrDrained.catch(() => {});
-    if (/Hook already exists/i.test(errTail)) {
-      if (await cleanupForwardingHooks(repo)) f.backoffMs = 5_000; // cleaned — retry promptly; else keep backing off
-    } else if (/HTTP 40[34]|Resource not accessible/i.test(errTail)) {
+    if (f.stopped) return;
+    if (f.proc === proc) f.proc = null;
+    const uptimeMs = Date.now() - startedAt;
+    if (uptimeMs > 60_000) f.backoffMs = 5_000;
+    const errOutput = errHead === errTail ? errHead : `${errHead}\n...\n${errTail}`;
+    const detail = failureDetail(errOutput);
+    console.error(`forwarder ${repo} exited (code=${code})${detail ? `: ${detail}` : ""}`);
+    if (/Hook already exists/i.test(errOutput)) {
+      log(`forwarder ${repo}: another GitHub CLI forwarder owns this repository — poll-only for this repo`);
+      f.stopped = true;
+      return;
+    }
+    if (/Resource not accessible by (?:personal access token|integration)|Must have admin rights to Repository/i.test(errOutput)) {
       log(`forwarder ${repo}: cannot create webhook (no admin access) — poll-only for this repo`);
       f.stopped = true;
       return;

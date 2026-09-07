@@ -27,6 +27,7 @@ stage() {
 }
 
 quiet_log=""
+install_substep=""
 cleanup_quiet_log() {
   [[ -z "$quiet_log" ]] || rm -f "$quiet_log"
 }
@@ -34,11 +35,10 @@ finish_install() {
   local status=$?
   local reporter_bun reporter_pid watchdog_pid
   set +e
-  cleanup_quiet_log
   if [[ "$status" -ne 0 ]]; then
     reporter_bun="$(command -v bun 2>/dev/null)"
     if [[ -n "$reporter_bun" ]]; then
-      "$reporter_bun" "$root/scripts/installFailure.ts" "$install_stage" "$status" "$platform" >/dev/null 2>&1 &
+      "$reporter_bun" "$root/scripts/installFailure.ts" "$install_stage" "$status" "$platform" "$install_substep" "$quiet_log" >/dev/null 2>&1 &
       reporter_pid=$!
       (sleep 2; kill -KILL "$reporter_pid" 2>/dev/null) &
       watchdog_pid=$!
@@ -47,6 +47,7 @@ finish_install() {
       wait "$watchdog_pid" 2>/dev/null
     fi
   fi
+  cleanup_quiet_log
 }
 trap finish_install EXIT
 
@@ -55,17 +56,17 @@ quiet_in() {
   local directory="$2"
   local status
   shift 2
+  install_substep="$label"
   quiet_log="$(mktemp "${TMPDIR:-/tmp}/pr-cockpit-install.XXXXXX")"
   if (cd "$directory" && "$@") >"$quiet_log" 2>&1; then
     rm -f "$quiet_log"
     quiet_log=""
+    install_substep=""
     return 0
   else
     status=$?
     printf '%bpr-cockpit: %s failed%b\n' "$bold" "$label" "$reset" >&2
     cat "$quiet_log" >&2
-    rm -f "$quiet_log"
-    quiet_log=""
     return "$status"
   fi
 }

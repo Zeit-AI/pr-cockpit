@@ -867,3 +867,54 @@ test("workflow refresh failures reach all waiters and allow a later request", as
   `);
   expect(result).toEqual({ statuses: ["rejected", "rejected"], retried: true });
 });
+
+test("recent Actions refresh persists each successful component without clearing failed cached data", async () => {
+  const result = await runScenario("pr-cockpit-actions-partial-refresh-", `
+    import * as actions from ${JSON.stringify(runLogsUrl)};
+    import * as dbm from ${JSON.stringify(dbUrl)};
+    dbm.replaceActionWorkflows("acme/app", [{
+      id: 1, name: "Cached workflow", path: ".github/workflows/cached.yml", state: "active",
+    }]);
+    const run = {
+      id: 70, run_attempt: 1, head_sha: "a".repeat(40), head_branch: "main", name: "CI",
+      path: ".github/workflows/ci.yml", status: "completed", conclusion: "success",
+      updated_at: "2026-08-24T10:04:00Z", html_url: null,
+    };
+    const failures = [];
+    try {
+      await actions.refreshRecentActions(
+        "acme/app",
+        async () => [run],
+        async () => { throw new Error("workflow catalog unavailable"); },
+      );
+    } catch (error) {
+      failures.push(error.message);
+    }
+    const afterRunSuccess = {
+      runs: dbm.listWorkflowRuns(["acme/app"]).map((entry) => entry.run_id),
+      workflows: dbm.listActionWorkflows(["acme/app"]).map((entry) => entry.name),
+    };
+    try {
+      await actions.refreshRecentActions(
+        "acme/app",
+        async () => { throw new Error("workflow runs unavailable"); },
+        async () => [{ id: 2, name: "Fresh workflow", path: ".github/workflows/fresh.yml", state: "active" }],
+      );
+    } catch (error) {
+      failures.push(error.message);
+    }
+    console.log(JSON.stringify({
+      failures,
+      afterRunSuccess,
+      afterWorkflowSuccess: {
+        runs: dbm.listWorkflowRuns(["acme/app"]).map((entry) => entry.run_id),
+        workflows: dbm.listActionWorkflows(["acme/app"]).map((entry) => entry.name),
+      },
+    }));
+  `);
+  expect(result).toEqual({
+    failures: ["workflow catalog unavailable", "workflow runs unavailable"],
+    afterRunSuccess: { runs: [70], workflows: ["Cached workflow"] },
+    afterWorkflowSuccess: { runs: [70], workflows: ["Fresh workflow"] },
+  });
+});

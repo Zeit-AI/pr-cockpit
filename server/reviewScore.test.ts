@@ -1,9 +1,18 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { db, getSetting, setSetting } from "./db.ts";
-import { aggregateReviewScore, aggregateReviewStale, candidateTexts, currentReviewerScores, isValidLlmScoreResult, parseBotScore, reviewedShaAt, reviewBots, reviewerLogins } from "./reviewScore.ts";
+import {
+  aggregateReviewScore,
+  aggregateReviewStale,
+  candidateTexts,
+  currentReviewerScores,
+  parseBotScore,
+  parseLabelledScore,
+  reviewedShaAt,
+  reviewBots,
+  reviewerLogins,
+} from "./reviewScore.ts";
 
 const EXAMPLE_REVIEW = "Quality Score: 4/5";
-const CURSOR_REVIEW = "Cursor Bugbot found 2 potential issues.";
 const originalReviewBots = getSetting("review_bots");
 
 function configureReviewBots(patterns: string[]): void {
@@ -15,23 +24,49 @@ afterEach(() => {
   else setSetting("review_bots", originalReviewBots);
 });
 
-function comment(login: string, id: string, body: string) {
-  return { id, author: { login }, body, createdAt: "2026-01-01T00:00:00Z" };
+function comment(login: string, id: string, body: string, at = "2026-01-01T00:00:00Z") {
+  return { id, author: { login }, body, createdAt: at };
 }
 
-function review(login: string, id: string, body: string) {
-  return { id, author: { login }, state: "COMMENTED", body, submittedAt: "2026-01-01T00:00:00Z" };
+function review(login: string, id: string, body: string, at = "2026-01-01T00:00:00Z") {
+  return { id, author: { login }, state: "COMMENTED", body, submittedAt: at };
+}
+
+type ReviewFixture = {
+  id: string;
+  author: { login: string };
+  state: string;
+  body: string;
+  submittedAt: string;
+};
+
+type CommentFixture = {
+  id: string;
+  author: { login: string; __typename?: string };
+  body: string;
+  createdAt: string;
+};
+
+function detail(reviews: ReviewFixture[], comments: CommentFixture[]) {
+  return {
+    reviews: { nodes: reviews },
+    comments: { nodes: comments },
+    reviewRequests: { nodes: [] },
+    headRefOid: "head",
+    commitList: {
+      nodes: [
+        { commit: { oid: "old", committedDate: "2026-01-01T00:00:00Z" } },
+        { commit: { oid: "head", committedDate: "2026-01-03T00:00:00Z" } },
+      ],
+    },
+  };
 }
 
 describe("review bot registry", () => {
-  test("parses a configured bot score", () => {
+  test("configured regexes are authoritative", () => {
     configureReviewBots(["Quality Score:\\s*(\\d)\\/5"]);
     expect(parseBotScore("example-reviewer", EXAMPLE_REVIEW)).toBe(4);
-  });
-
-  test("a known bot whose patterns miss has no score", () => {
-    configureReviewBots(["Quality Score:\\s*(\\d)\\/5"]);
-    expect(parseBotScore("example-reviewer", "No numeric verdict here.")).toBe(null);
+    expect(parseBotScore("example-reviewer", "Confidence Score: 2/5")).toBe(null);
   });
 
   test("the first matching pattern wins", () => {
@@ -39,7 +74,7 @@ describe("review bot registry", () => {
     expect(parseBotScore("example-reviewer", "Quality Score: 4/5\nLegacy Score: 2/5")).toBe(4);
   });
 
-  test("an unknown login has no score", () => {
+  test("an unknown login has no bot score", () => {
     configureReviewBots(["Quality Score:\\s*(\\d)\\/5"]);
     expect(parseBotScore("unknown-reviewer", EXAMPLE_REVIEW)).toBe(null);
   });
@@ -62,82 +97,109 @@ describe("review bot registry", () => {
   });
 });
 
-describe("candidateTexts", () => {
-  test("finds a bot's content wherever it posted it", () => {
-    const detail = {
-      reviews: { nodes: [review("cursor", "r1", CURSOR_REVIEW), review("example-reviewer", "r2", "")] },
-      comments: { nodes: [comment("example-reviewer", "c1", EXAMPLE_REVIEW)] },
-    };
-    expect(candidateTexts(detail, "cursor")).toEqual([{ id: "r1", body: CURSOR_REVIEW, at: "2026-01-01T00:00:00Z" }]);
-    expect(candidateTexts(detail, "example-reviewer")).toEqual([{ id: "c1", body: EXAMPLE_REVIEW, at: "2026-01-01T00:00:00Z" }]);
+describe("labelled reviewer scores", () => {
+  test("normalizes explicit supported scales to five", () => {
+    expect(parseLabelledScore("Quality: 8/10")).toBe(4);
+    expect(parseLabelledScore("Confidence rating = 90%")).toBe(4.5);
+    expect(parseLabelledScore("quality score: 3.5/5")).toBe(3.5);
   });
 
-  test("newest text comes first", () => {
-    const detail = {
-      reviews: { nodes: [] },
-      comments: { nodes: [comment("example-reviewer", "old", "Quality Score: 2/5"), comment("example-reviewer", "new", EXAMPLE_REVIEW)] },
+  test("does not infer a score from prose, verdicts, or bare numbers", () => {
+    expect(parseLabelledScore("Looks good, ship it. 10 files reviewed.")).toBe(null);
+    expect(parseLabelledScore("APPROVED")).toBe(null);
+    expect(parseLabelledScore("4/5")).toBe(null);
+  });
+
+  test("rejects values outside their labelled scale", () => {
+    expect(parseLabelledScore("Quality score: 11/10")).toBe(null);
+    expect(parseLabelledScore("Confidence: 120%")).toBe(null);
+  });
+});
+
+describe("candidateTexts", () => {
+  test("orders reviews and comments by their timestamps, independent of API array order", () => {
+    const source = {
+      reviews: { nodes: [review("person", "middle", EXAMPLE_REVIEW, "2026-01-02T00:00:00Z")] },
+      comments: {
+        nodes: [
+          comment("person", "new", "Quality Score: 5/5", "2026-01-03T00:00:00Z"),
+          comment("person", "old", "Quality Score: 2/5", "2026-01-01T00:00:00Z"),
+        ],
+      },
     };
-    expect(candidateTexts(detail, "example-reviewer").map((t) => t.id)).toEqual(["new", "old"]);
+    expect(candidateTexts(source, "person").map((text) => text.id)).toEqual(["new", "middle", "old"]);
   });
 });
 
 describe("reviewerLogins", () => {
-  test("promotes a known bot that only left an issue comment", () => {
+  test("promotes known comment-only bots but not arbitrary commenters", () => {
     configureReviewBots(["Quality Score:\\s*(\\d)\\/5"]);
-    const detail = {
-      reviews: { nodes: [review("greptile-apps", "r1", "Confidence Score: 4/5")] },
-      comments: { nodes: [comment("example-reviewer", "c1", EXAMPLE_REVIEW)] },
-      reviewRequests: { nodes: [{ requestedReviewer: { login: "theolundqvist" } }] },
+    const source = {
+      reviews: { nodes: [review("human-reviewer", "r1", "Looks good")] },
+      comments: { nodes: [comment("example-reviewer", "c1", EXAMPLE_REVIEW), comment("random-commenter", "c2", EXAMPLE_REVIEW)] },
+      reviewRequests: { nodes: [{ requestedReviewer: { login: "requested-reviewer" } }] },
     };
-    expect(reviewerLogins(detail)).toEqual(new Set(["greptile-apps", "example-reviewer", "theolundqvist"]));
+    expect(reviewerLogins(source)).toEqual(new Set(["human-reviewer", "requested-reviewer", "example-reviewer"]));
   });
 
-  test("never promotes an arbitrary human commenter", () => {
-    configureReviewBots(["Quality Score:\\s*(\\d)\\/5"]);
-    const detail = {
-      reviews: { nodes: [] },
-      comments: { nodes: [comment("some-human", "c1", "looks good to me"), comment("example-reviewer", "c2", EXAMPLE_REVIEW)] },
-      reviewRequests: { nodes: [] },
-    };
-    expect(reviewerLogins(detail)).toEqual(new Set(["example-reviewer"]));
-  });
-});
-
-describe("aggregateReviewScore", () => {
-  test("takes the lowest score across greptile and the other reviewers", () => {
-    expect(aggregateReviewScore({ "example-reviewer": { score: 2, basis: null } }, 4)).toBe(2);
-  });
-
-  test("null-score reviewers are excluded, not treated as zero", () => {
-    expect(aggregateReviewScore({ "example-reviewer": { score: 2, basis: null }, cursor: { score: null, basis: null } }, 4)).toBe(2);
-  });
-
-  test("greptile is passed in resolved and its raw entry is ignored to avoid double-counting", () => {
-    expect(aggregateReviewScore({ "greptile-apps": { score: 4, basis: null }, "example-reviewer": { score: 3, basis: null } }, 5)).toBe(3);
-  });
-
-  test("no scored reviewer at all yields no score", () => {
-    expect(aggregateReviewScore({ cursor: { score: null, basis: null } }, null)).toBe(null);
+  test("parses explicit comment scores from GitHub bots without requiring custom patterns", () => {
+    const source = detail([], [
+      { ...comment("review-app", "app-score", "Quality score: 8/10"), author: { login: "review-app", __typename: "Bot" } },
+      comment("cursor", "cursor-score", "Confidence: 90%"),
+    ]);
+    expect(currentReviewerScores(source)).toEqual({
+      "review-app": { score: 4, stale: true },
+      cursor: { score: 4.5, stale: true },
+    });
   });
 });
 
 describe("currentReviewerScores", () => {
-  // scoring itself runs and persists via scoreReviewers elsewhere - this only reads back what's stored
-  test("no db row yet means no entry at all, not a false 'no verdict'", () => {
-    const detail = {
-      reviews: { nodes: [] },
-      comments: { nodes: [comment("example-reviewer", "c1", EXAMPLE_REVIEW)] },
-      reviewRequests: { nodes: [{ requestedReviewer: { login: "theolundqvist" } }] },
-      headRefOid: "head",
-      commitList: { nodes: [] },
-    };
-    expect(currentReviewerScores(detail)).toEqual({});
+  test("uses the latest actual posted score and ignores newer scoreless prose", () => {
+    const source = detail([
+      review("human-reviewer", "scored", "Quality Score: 6/10", "2026-01-02T00:00:00Z"),
+      review("human-reviewer", "follow-up", "Thanks, this is resolved.", "2026-01-04T00:00:00Z"),
+    ], []);
+    expect(currentReviewerScores(source)).toEqual({
+      "human-reviewer": { score: 3, stale: true },
+    });
+  });
+
+  test("scoreless reviewers have no score entry", () => {
+    expect(currentReviewerScores(detail([review("human-reviewer", "plain", "Looks good to me.")], []))).toEqual({});
+  });
+
+  test("configured bots never fall through to the shared parser", () => {
+    configureReviewBots(["Special Rating:\\s*(\\d)\\/5"]);
+    expect(currentReviewerScores(detail([review("example-reviewer", "r1", EXAMPLE_REVIEW)], []))).toEqual({});
+  });
+
+  test("invalid configured patterns do not activate generic score parsing", () => {
+    configureReviewBots(["("]);
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(currentReviewerScores(detail([review("example-reviewer", "r1", EXAMPLE_REVIEW)], []))).toEqual({});
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("legacy generated rows cannot override the posted body", () => {
+    db.exec("CREATE TABLE review_scores (node_id TEXT PRIMARY KEY, score REAL)");
+    try {
+      db.query("INSERT INTO review_scores VALUES (?, ?)").run("r1", 1);
+      expect(currentReviewerScores(detail([review("human-reviewer", "r1", "Quality Score: 5/5", "2026-01-04T00:00:00Z")], []))).toEqual({
+        "human-reviewer": { score: 5, stale: false },
+      });
+    } finally {
+      db.exec("DROP TABLE review_scores");
+    }
   });
 });
 
 describe("reviewedShaAt", () => {
   const commit = (oid: string, committedDate: string) => ({ commit: { oid, committedDate } });
-  const detail = {
+  const source = {
     commitList: {
       nodes: [commit("a", "2026-01-01T00:00:00Z"), commit("b", "2026-01-02T00:00:00Z"), commit("c", "2026-01-03T00:00:00Z")],
     },
@@ -145,67 +207,45 @@ describe("reviewedShaAt", () => {
   };
 
   test("picks the newest commit at or before the review time", () => {
-    expect(reviewedShaAt(detail, "2026-01-02T12:00:00Z")).toBe("b");
+    expect(reviewedShaAt(source, "2026-01-02T12:00:00Z")).toBe("b");
   });
 
-  test("a review after every commit maps to the head commit", () => {
-    expect(reviewedShaAt(detail, "2026-01-09T00:00:00Z")).toBe("c");
-  });
-
-  test("a review predating all known commits is unknown, not stale", () => {
-    expect(reviewedShaAt(detail, "2025-12-01T00:00:00Z")).toBe(null);
-  });
-
-  test("no commit history is unknown, not stale", () => {
+  test("unknown commit history cannot prove a score stale", () => {
     expect(reviewedShaAt({ commitList: { nodes: [] }, headRefOid: "c" }, "2026-01-02T00:00:00Z")).toBe(null);
+    expect(reviewedShaAt(source, "2025-12-01T00:00:00Z")).toBe(null);
   });
 
-  test("a git committedDate with an author offset is compared by real instant, not string order", () => {
-    // x committed at 06:00Z but stamped +02:00; string order would put it after the 07:00Z review and miss it
-    const offsetDetail = {
+  test("compares timestamp instants rather than timestamp strings", () => {
+    const offsetSource = {
       commitList: { nodes: [commit("w", "2026-07-06T00:00:00Z"), commit("x", "2026-07-06T08:00:00+02:00")] },
       headRefOid: "x",
     };
-    expect(reviewedShaAt(offsetDetail, "2026-07-06T07:00:00Z")).toBe("x");
+    expect(reviewedShaAt(offsetSource, "2026-07-06T07:00:00Z")).toBe("x");
   });
 });
 
-describe("aggregateReviewStale", () => {
-  test("a non-greptile reviewer whose stale score sets the min marks the aggregate stale", () => {
-    expect(aggregateReviewStale({ "example-reviewer": { score: 2, basis: null, stale: true } }, 2)).toBe(true);
+describe("review score aggregation", () => {
+  test("takes the lowest real score and excludes scoreless reviewers", () => {
+    expect(aggregateReviewScore({
+      "example-reviewer": { score: 2 },
+      cursor: { score: null },
+    }, 4)).toBe(2);
   });
 
-  test("a stale reviewer above the min does not mark the aggregate stale", () => {
-    expect(aggregateReviewStale({ "example-reviewer": { score: 4, basis: null, stale: true }, cursor: { score: 2, basis: null, stale: false } }, 2)).toBe(false);
+  test("Greptile is supplied from its true confidence metadata and not double-counted", () => {
+    expect(aggregateReviewScore({
+      "greptile-apps": { score: 1 },
+      "example-reviewer": { score: 3 },
+    }, 5)).toBe(3);
   });
 
-  test("greptile's own staleness is not counted here", () => {
-    expect(aggregateReviewStale({ "greptile-apps": { score: 3, basis: null, stale: true } }, 3)).toBe(false);
+  test("no scored reviewer yields no score", () => {
+    expect(aggregateReviewScore({ cursor: { score: null } }, null)).toBe(null);
   });
 
-  test("no aggregate score is never stale", () => {
-    expect(aggregateReviewStale({ "example-reviewer": { score: null, basis: null, stale: true } }, null)).toBe(false);
-  });
-});
-
-describe("isValidLlmScoreResult", () => {
-  test("accepts a null score with a null basis - the genuinely-unscored case", () => {
-    expect(isValidLlmScoreResult({ score: null, basis: null })).toBe(true);
-  });
-
-  test("accepts a half-point score with a basis string", () => {
-    expect(isValidLlmScoreResult({ score: 3.5, basis: "flags one real bug, otherwise clean" })).toBe(true);
-  });
-
-  test("rejects a non-half score", () => {
-    expect(isValidLlmScoreResult({ score: 3.2, basis: "x" })).toBe(false);
-  });
-
-  test("rejects an out-of-range score", () => {
-    expect(isValidLlmScoreResult({ score: 7, basis: "x" })).toBe(false);
-  });
-
-  test("rejects a basis that isn't a string when a score is present", () => {
-    expect(isValidLlmScoreResult({ score: 4, basis: 4 })).toBe(false);
+  test("only a stale non-Greptile minimum marks the aggregate stale", () => {
+    expect(aggregateReviewStale({ "example-reviewer": { score: 2, stale: true } }, 2)).toBe(true);
+    expect(aggregateReviewStale({ "example-reviewer": { score: 4, stale: true }, cursor: { score: 2, stale: false } }, 2)).toBe(false);
+    expect(aggregateReviewStale({ "greptile-apps": { score: 3, stale: true } }, 3)).toBe(false);
   });
 });

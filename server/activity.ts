@@ -1,6 +1,5 @@
 import { getPr, setAutoMergeArmed } from "./db.ts";
 import { getFixerAgent, launchAutofixAgent, launchCustomAgent, launchFixerAgent } from "./agents.ts";
-import { maybeRescore } from "./rescorer.ts";
 import { agentSettings, CUSTOM_AGENT_ID_PREFIX } from "./settings.ts";
 import { prKeyOf } from "./prKey.ts";
 
@@ -23,10 +22,6 @@ export function onPrActivity(repo: string, number: number, knownBefore: boolean)
 async function dispatch(repo: string, number: number, knownBefore: boolean): Promise<void> {
   for (const agent of agentSettings()) {
     if (!agent.enabled || agent.trigger !== "activity") continue;
-    if (agent.id === "rescorer") {
-      await maybeRescore(repo, number);
-      continue;
-    }
     // knownBefore=false is first sight (boot / new PR), not real push activity - launching there would arm every PR at startup
     if (!knownBefore) continue;
     if (agent.id.startsWith(CUSTOM_AGENT_ID_PREFIX) && !agent.prompt_template.trim()) continue;

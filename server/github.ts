@@ -16,12 +16,177 @@ import { readSettings } from "./settings.ts";
 const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 type GithubGraphqlError = { type?: string; message?: string };
+export type GithubQuotaResourceName = "core" | "search" | "graphql";
+export type GithubRequestErrorKind = "http" | "graphql" | "quota" | "transport";
 
 export class GithubRequestError extends Error {
-  constructor(message: string, readonly status: 404 | 502, readonly graphqlErrors: readonly GithubGraphqlError[] = []) {
-    super(message);
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly graphqlErrors: readonly GithubGraphqlError[] = [],
+    readonly kind: GithubRequestErrorKind = "http",
+    readonly resource: GithubQuotaResourceName | null = null,
+    readonly resetAt: string | null = null,
+    cause?: unknown,
+  ) {
+    super(message, cause === undefined ? undefined : { cause });
     this.name = "GithubRequestError";
   }
+}
+
+type BlockedQuota = { status: number; resetAt: string; until: number };
+const blockedQuotas = new Map<GithubQuotaResourceName, BlockedQuota>();
+const responseQuotaResources = new WeakMap<Response, GithubQuotaResourceName>();
+const responseQuotaGenerations = new WeakMap<Response, number>();
+let activeQuotaToken: string | null = null;
+let activeQuotaGeneration = 0;
+
+function quotaGeneration(token: string): number {
+  if (activeQuotaToken !== token) {
+    activeQuotaToken = token;
+    activeQuotaGeneration++;
+    blockedQuotas.clear();
+    cachedQuota = null;
+  }
+  return activeQuotaGeneration;
+}
+function responseHasActiveQuota(response: Response): boolean {
+  return responseQuotaGenerations.get(response) === activeQuotaGeneration;
+}
+
+function updateQuotaBlock(
+  resource: GithubQuotaResourceName,
+  remaining: number,
+  resetAt: string | null,
+  status = 403,
+): void {
+  if (remaining > 0) {
+    blockedQuotas.delete(resource);
+    return;
+  }
+  const until = resetAt === null ? Number.NaN : Date.parse(resetAt);
+  if (remaining === 0 && resetAt !== null && Number.isFinite(until)) blockedQuotas.set(resource, { status, resetAt, until });
+}
+
+function quotaResource(path: string): GithubQuotaResourceName {
+  if (path === "/graphql") return "graphql";
+  return path.startsWith("/search/") ? "search" : "core";
+}
+
+function quotaReset(response: Response): { resetAt: string; until: number } | null {
+  const retryAfter = response.headers.get("retry-after");
+  let until = Number.NaN;
+  if (retryAfter !== null) {
+    const seconds = Number(retryAfter);
+    until = Number.isFinite(seconds) ? Date.now() + Math.max(0, seconds) * 1_000 : Date.parse(retryAfter);
+  }
+  const rawReset = response.headers.get("x-ratelimit-reset");
+  if (rawReset !== null) {
+    const reset = Number(rawReset);
+    if (Number.isFinite(reset)) until = Math.max(Number.isFinite(until) ? until : 0, reset * 1_000);
+  }
+  return Number.isFinite(until) ? { until, resetAt: new Date(until).toISOString() } : null;
+}
+
+function responseQuotaResource(response: Response, fallback: GithubQuotaResourceName): GithubQuotaResourceName {
+  const value = response.headers.get("x-ratelimit-resource");
+  return value === "core" || value === "search" || value === "graphql"
+    ? value
+    : responseQuotaResources.get(response) ?? fallback;
+}
+
+function accountQuota(response: Response, fallback: GithubQuotaResourceName, generation: number): void {
+  if (generation !== activeQuotaGeneration) return;
+  const resource = responseQuotaResource(response, fallback);
+  const rawRemaining = response.headers.get("x-ratelimit-remaining");
+  const remaining = rawRemaining === null ? Number.NaN : Number(rawRemaining);
+  const reset = quotaReset(response);
+  if ((remaining === 0 || ((response.status === 403 || response.status === 429) && response.headers.has("retry-after"))) && reset) {
+    updateQuotaBlock(resource, 0, reset.resetAt, response.ok ? 403 : response.status);
+  } else if (Number.isFinite(remaining) && remaining > 0) {
+    updateQuotaBlock(resource, remaining, null);
+  }
+}
+
+function assertQuotaAvailable(resource: GithubQuotaResourceName): void {
+  const blocked = blockedQuotas.get(resource);
+  if (!blocked) return;
+  if (Date.now() >= blocked.until) {
+    blockedQuotas.delete(resource);
+    return;
+  }
+  throw new GithubRequestError(
+    `GitHub ${resource} quota exhausted until ${blocked.resetAt}`,
+    blocked.status,
+    [],
+    "quota",
+    resource,
+    blocked.resetAt,
+  );
+}
+
+async function githubApiResponse(
+  method: string,
+  path: string,
+  options: {
+    body?: unknown;
+    accept?: string;
+    redirect?: RequestRedirect;
+    authentication?: { token: string; generation: number };
+  } = {},
+): Promise<Response> {
+  const resource = quotaResource(path);
+  const token = options.authentication?.token ?? await ghToken();
+  const generation = options.authentication?.generation ?? quotaGeneration(token);
+  assertQuotaAvailable(resource);
+  let response: Response;
+  try {
+    response = await fetch(`https://api.github.com${path}`, {
+      method,
+      headers: {
+        Authorization: `bearer ${token}`,
+        Accept: options.accept ?? "application/vnd.github+json",
+        ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      redirect: options.redirect,
+    });
+  } catch (error) {
+    throw new GithubRequestError(
+      `GitHub ${resource} transport unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      503,
+      [],
+      "transport",
+      resource,
+      null,
+      error,
+    );
+  }
+  responseQuotaResources.set(response, resource);
+  responseQuotaGenerations.set(response, generation);
+  accountQuota(response, resource, generation);
+  return response;
+}
+
+async function githubResponseError(label: string, response: Response): Promise<GithubRequestError> {
+  const resource = responseQuotaResource(response, quotaResource(new URL(response.url || "https://api.github.com").pathname));
+  const reset = quotaReset(response);
+  const body = await response.text();
+  const quota = response.status === 429
+    || ((response.status === 403 || response.status === 429) && (
+      response.headers.get("x-ratelimit-remaining") === "0"
+      || response.headers.has("retry-after")
+      || /rate limit/i.test(body)
+    ));
+  if (quota && reset && responseHasActiveQuota(response)) updateQuotaBlock(resource, 0, reset.resetAt, response.status);
+  return new GithubRequestError(
+    `${label}: ${response.status}${body ? ` ${body}` : ""}`,
+    response.status,
+    [],
+    quota ? "quota" : "http",
+    resource,
+    quota ? reset?.resetAt ?? null : null,
+  );
 }
 
 export class StalePrHeadError extends Error {
@@ -71,29 +236,25 @@ async function graphql<T>(
   source: GithubUsageSource,
   operation: string,
 ): Promise<T> {
-  const token = await ghToken();
   const instrumented = instrumentGithubGraphql(query);
   let res: Response;
   try {
-    res = await fetch("https://api.github.com/graphql", {
-      method: "POST",
-      headers: {
-        Authorization: `bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ query: instrumented.document, variables }),
+    res = await githubApiResponse("POST", "/graphql", {
+      body: { query: instrumented.document, variables },
     });
   } catch (error) {
-    recordGithubGraphqlUsage({
-      occurredAt: new Date().toISOString(),
-      source,
-      operation,
-      cost: instrumented.fixedCost,
-      used: null,
-      remaining: null,
-      resetAt: null,
-      status: "error",
-    });
+    if (!(error instanceof GithubRequestError && error.kind === "quota")) {
+      recordGithubGraphqlUsage({
+        occurredAt: new Date().toISOString(),
+        source,
+        operation,
+        cost: instrumented.fixedCost,
+        used: null,
+        remaining: null,
+        resetAt: null,
+        status: "error",
+      });
+    }
     throw error;
   }
   const headerNumber = (name: string): number | null => {
@@ -107,6 +268,7 @@ async function graphql<T>(
     rateLimit: { cost: number; used: number; remaining: number; resetAt: string } | null,
     status: "ok" | "error",
   ) => {
+    if (!responseHasActiveQuota(res)) return;
     const used = rateLimit?.used ?? headerNumber("x-ratelimit-used");
     const remaining = rateLimit?.remaining ?? headerNumber("x-ratelimit-remaining");
     const resetAt = rateLimit?.resetAt ?? (headerReset === null ? null : new Date(headerReset * 1_000).toISOString());
@@ -129,8 +291,7 @@ async function graphql<T>(
   };
   if (!res.ok) {
     record(null, "error");
-    const status = res.status === 404 ? 404 : 502;
-    throw new GithubRequestError(`GraphQL request failed: ${res.status} ${await res.text()}`, status);
+    throw await githubResponseError("GraphQL request failed", res);
   }
   const body = (await res.json()) as {
     data?: T & Record<string, unknown>;
@@ -142,13 +303,25 @@ async function graphql<T>(
     remaining: number;
     resetAt: string;
   } | undefined;
+  if (rateLimit && responseHasActiveQuota(res)) updateQuotaBlock("graphql", rateLimit.remaining, rateLimit.resetAt);
   if (body.data) delete body.data[RATE_LIMIT_ALIAS];
   record(rateLimit ?? null, body.errors?.length ? "error" : "ok");
   if (body.errors?.length) {
-    const status = body.errors.every((error) => error.type === "NOT_FOUND") ? 404 : 502;
-    throw new GithubRequestError(`GraphQL errors: ${JSON.stringify(body.errors)}`, status, body.errors);
+    const missing = body.errors.every((error) => error.type === "NOT_FOUND");
+    const exhausted = body.errors.some((error) => error.type === "RATE_LIMIT" || error.type === "RATE_LIMITED");
+    const resetAt = rateLimit?.resetAt
+      ?? (headerReset === null ? cachedQuota?.graphql.resetAt ?? null : new Date(headerReset * 1_000).toISOString());
+    if (exhausted && responseHasActiveQuota(res)) updateQuotaBlock("graphql", 0, resetAt);
+    throw new GithubRequestError(
+      `GraphQL errors: ${JSON.stringify(body.errors)}`,
+      missing ? 404 : exhausted ? 403 : 502,
+      body.errors,
+      exhausted ? "quota" : "graphql",
+      "graphql",
+      exhausted ? resetAt : null,
+    );
   }
-  if (!body.data) throw new GithubRequestError("GraphQL response missing data", 502);
+  if (!body.data) throw new GithubRequestError("GraphQL response missing data", 502, [], "graphql", "graphql");
   return body.data;
 }
 
@@ -296,17 +469,15 @@ function updateCachedGraphqlQuota(
   };
 }
 export async function fetchGithubQuota(): Promise<GithubQuota> {
-  if (cachedQuota && Date.now() - Date.parse(cachedQuota.fetchedAt) < QUOTA_TTL_MS) return cachedQuota;
   if (mockGithub) {
     const resetAt = new Date(Date.now() + 60 * 60_000).toISOString();
     return { rest: { limit: 5_000, used: 10, remaining: 4_990, resetAt }, graphql: { limit: 5_000, used: 20, remaining: 4_980, resetAt }, fetchedAt: new Date().toISOString() };
   }
-
   const token = await ghToken();
-  const res = await fetch("https://api.github.com/rate_limit", {
-    headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" },
-  });
-  if (!res.ok) throw new Error(`GitHub quota request failed: ${res.status} ${await res.text()}`);
+  const generation = quotaGeneration(token);
+  if (cachedQuota && Date.now() - Date.parse(cachedQuota.fetchedAt) < QUOTA_TTL_MS) return cachedQuota;
+  const res = await githubApiResponse("GET", "/rate_limit", { authentication: { token, generation } });
+  if (!res.ok) throw await githubResponseError("GitHub quota request failed", res);
   const body = (await res.json()) as {
     resources: Record<"core" | "graphql", { limit: number; used: number; remaining: number; reset: number }>;
   };
@@ -314,8 +485,13 @@ export async function fetchGithubQuota(): Promise<GithubQuota> {
     const value = body.resources[name];
     return { limit: value.limit, used: value.used, remaining: value.remaining, resetAt: new Date(value.reset * 1_000).toISOString() };
   };
-  cachedQuota = { rest: resource("core"), graphql: resource("graphql"), fetchedAt: new Date().toISOString() };
-  return cachedQuota;
+  const quota = { rest: resource("core"), graphql: resource("graphql"), fetchedAt: new Date().toISOString() };
+  if (responseHasActiveQuota(res)) {
+    cachedQuota = quota;
+    updateQuotaBlock("core", quota.rest.remaining, quota.rest.resetAt);
+    updateQuotaBlock("graphql", quota.graphql.remaining, quota.graphql.resetAt);
+  }
+  return quota;
 }
 
 export interface SearchHit {
@@ -582,34 +758,62 @@ export async function searchRecentPrs(repo: string): Promise<PrIndexEntry[]> {
   }));
 }
 
-export async function searchClosedPrs(repos: string[]): Promise<PrIndexEntry[]> {
-  if (repos.length === 0) return [];
-  if (mockGithub) {
-    const fixture = mockGithub;
-    return repos.flatMap((repo) =>
-      fixture.searchRecentPrs(repo)
+export interface ClosedPrSearchFailure {
+  repo: string;
+  error: GithubRequestError;
+}
+
+export interface ClosedPrSearchResult {
+  items: PrIndexEntry[];
+  failures: ClosedPrSearchFailure[];
+}
+
+export async function searchClosedPrs(repos: string[]): Promise<ClosedPrSearchResult> {
+  const items: PrIndexEntry[] = [];
+  const failures: ClosedPrSearchFailure[] = [];
+  for (const repo of repos) {
+    if (mockGithub) {
+      items.push(...mockGithub.searchRecentPrs(repo)
         .filter((entry) => entry.state === "MERGED" || entry.state === "CLOSED")
-        .map((entry) => ({ ...entry, involvesMe: true }))
-    );
+        .map((entry) => ({ ...entry, involvesMe: true })));
+      continue;
+    }
+    const searchQuery = `is:pr is:closed involves:@me archived:false repo:${repo} sort:updated-desc`;
+    try {
+      const repoItems = await restSearchPrs(searchQuery, 100);
+      if (repoItems.length === 100) {
+        console.warn(`search hit the 100-result cap, PRs may be missing: ${searchQuery}`);
+      }
+      items.push(...repoItems.map((item) => ({
+        repo: restSearchRepo(item),
+        number: item.number,
+        title: item.title,
+        state: restSearchState(item),
+        isDraft: item.draft,
+        author: item.user?.login ?? "unknown",
+        updatedAt: item.updated_at,
+        mergedAt: item.pull_request.merged_at,
+        closedAt: item.closed_at,
+        involvesMe: true,
+      })));
+    } catch (error) {
+      failures.push({
+        repo,
+        error: error instanceof GithubRequestError
+          ? error
+          : new GithubRequestError(
+            `GitHub search unavailable for ${repo}: ${error instanceof Error ? error.message : String(error)}`,
+            503,
+            [],
+            "transport",
+            "search",
+            null,
+            error,
+          ),
+      });
+    }
   }
-  const repoFilter = repos.map((repo) => `repo:${repo}`).join(" ");
-  const searchQuery = `is:pr is:closed involves:@me archived:false ${repoFilter} sort:updated-desc`;
-  const items = await restSearchPrs(searchQuery, 100);
-  if (items.length === 100) {
-    console.warn(`search hit the 100-result cap, PRs may be missing: ${searchQuery}`);
-  }
-  return items.map((item) => ({
-    repo: restSearchRepo(item),
-    number: item.number,
-    title: item.title,
-    state: restSearchState(item),
-    isDraft: item.draft,
-    author: item.user?.login ?? "unknown",
-    updatedAt: item.updated_at,
-    mergedAt: item.pull_request.merged_at,
-    closedAt: item.closed_at,
-    involvesMe: true,
-  }));
+  return { items, failures };
 }
 
 export interface ViewerRepo {
@@ -812,9 +1016,10 @@ const CHECK_CONTEXT_FIELDS = `
 `;
 
 const THREAD_COMMENT_FIELDS = `
+  id
   databaseId
   diffHunk
-  author { login avatarUrl }
+  author { __typename login avatarUrl }
   body
   createdAt
   ${REACTION_GROUPS_FIELD}
@@ -867,7 +1072,7 @@ query($owner: String!, $name: String!, $number: Int!) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id
-          author { login avatarUrl }
+          author { __typename login avatarUrl }
           state
           body
           submittedAt
@@ -878,7 +1083,7 @@ query($owner: String!, $name: String!, $number: Int!) {
         pageInfo { hasNextPage endCursor }
         nodes {
           id
-          author { login avatarUrl }
+          author { __typename login avatarUrl }
           body
           createdAt
           ${REACTION_GROUPS_FIELD}
@@ -899,7 +1104,7 @@ query($owner: String!, $name: String!, $number: Int!) {
           }
         }
       }
-      author { login avatarUrl }
+      author { __typename login avatarUrl }
     }
   }
 }`;
@@ -922,10 +1127,10 @@ function mapReactions(groups: RawReactionGroup[]): Reaction[] {
     .map((g) => ({ content: g.content, count: g.reactors.totalCount, viewerReacted: g.viewerHasReacted }));
 }
 
-type Author = { login: string; avatarUrl: string };
+type Author = { __typename?: string; login: string; avatarUrl: string };
 type ReviewNode = { id: string; author: Author | null; state: string; body: string; submittedAt: string };
 type CommentNode = { id: string; author: Author | null; body: string; createdAt: string };
-type ThreadCommentNode = { databaseId: number | null; diffHunk: string; author: Author | null; body: string; createdAt: string };
+type ThreadCommentNode = { id: string; databaseId: number | null; diffHunk: string; author: Author | null; body: string; createdAt: string };
 
 export function reviewHunkTail(hunk: string): string {
   return hunk
@@ -1054,7 +1259,7 @@ type RawPrDetailReview = Pick<
 type RawPrDetailResidual = RawPrDetailChecks & RawPrDetailReview;
 type RestPrDetailBase = Omit<RawPrDetail, keyof RawPrDetailResidual> & Pick<RawPrDetail, "author">;
 
-type RestUser = { node_id: string; login: string; avatar_url: string };
+type RestUser = { node_id: string; login: string; avatar_url: string; type?: string };
 type RestPullRequest = {
   node_id: string;
   title: string;
@@ -1094,7 +1299,7 @@ export function mapRestPrDetailBase(pullRequest: RestPullRequest, files: RestPul
     mergedAt: pullRequest.merged_at,
     closedAt: pullRequest.closed_at,
     isDraft: pullRequest.draft,
-    author: pullRequest.user ? { login: pullRequest.user.login, avatarUrl: pullRequest.user.avatar_url } : null,
+    author: pullRequest.user ? { ...(pullRequest.user.type ? { __typename: pullRequest.user.type } : {}), login: pullRequest.user.login, avatarUrl: pullRequest.user.avatar_url } : null,
     baseRefName: pullRequest.base.ref,
     baseRefOid: pullRequest.base.sha,
     headRefName: pullRequest.head.ref,
@@ -1129,7 +1334,7 @@ export function mapRestPrDetailBase(pullRequest: RestPullRequest, files: RestPul
       nodes: [
         ...pullRequest.requested_reviewers.map((reviewer) => ({
           requestedReviewer: {
-            __typename: "User",
+            ...(reviewer.type ? { __typename: reviewer.type } : {}),
             login: reviewer.login,
             avatarUrl: reviewer.avatar_url,
           },
@@ -1356,12 +1561,7 @@ export async function fetchPrDetail(
     graphql<{
       repository: { pullRequest: RawPrDetailReview | null } | null;
     }>(DETAIL_REVIEW_QUERY, variables, source, "PR review detail"),
-    fetchRestPrDetailBase(repo, number).catch((error) => {
-      if (error instanceof RestRequestError) {
-        throw new GithubRequestError(error.message, error.status === 404 ? 404 : 502);
-      }
-      throw error;
-    }),
+    fetchRestPrDetailBase(repo, number),
     getViewerLogin(),
   ]);
   const checks = checksData.repository?.pullRequest;
@@ -1433,23 +1633,16 @@ export interface PrCommentSince {
   url: string | null;
 }
 
-async function fetchRestPages<T>(initialUrl: string, token: string): Promise<T[]> {
+async function fetchRestPages<T>(initialUrl: string): Promise<T[]> {
   const pages: T[] = [];
   const seen = new Set<string>();
   let url: string | null = initialUrl;
   while (url !== null) {
     if (seen.has(url)) throw new GithubRequestError("GitHub REST pagination repeated a page", 502);
     seen.add(url);
-    const response: Response = await fetch(url, {
-      headers: {
-        Authorization: `bearer ${token}`,
-        Accept: "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
-    if (!response.ok) {
-      throw new GithubRequestError(`GitHub comments request failed: ${response.status} ${await response.text()}`, response.status === 404 ? 404 : 502);
-    }
+    const parsed = new URL(url);
+    const response = await githubApiResponse("GET", `${parsed.pathname}${parsed.search}`);
+    if (!response.ok) throw await githubResponseError("GitHub comments request failed", response);
     pages.push(...await response.json() as T[]);
     const next: string | undefined = response.headers
       .get("link")
@@ -1500,7 +1693,6 @@ export async function fetchPrCommentsSince(repo: string, number: number, since: 
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }
 
-  const token = await ghToken();
   const baseUrl = `https://api.github.com/repos/${repo}`;
   const encodedSince = encodeURIComponent(since);
   const [issueComments, reviewComments, reviews] = await Promise.all([
@@ -1509,7 +1701,7 @@ export async function fetchPrCommentsSince(repo: string, number: number, since: 
       body: string;
       created_at: string;
       html_url: string;
-    }>(`${baseUrl}/issues/${number}/comments?since=${encodedSince}&per_page=100`, token),
+    }>(`${baseUrl}/issues/${number}/comments?since=${encodedSince}&per_page=100`),
     fetchRestPages<{
       user: { login: string } | null;
       body: string;
@@ -1518,14 +1710,14 @@ export async function fetchPrCommentsSince(repo: string, number: number, since: 
       path: string;
       line: number | null;
       original_line: number | null;
-    }>(`${baseUrl}/pulls/${number}/comments?since=${encodedSince}&per_page=100`, token),
+    }>(`${baseUrl}/pulls/${number}/comments?since=${encodedSince}&per_page=100`),
     fetchRestPages<{
       user: { login: string } | null;
       body: string;
       submitted_at: string | null;
       state: string;
       html_url: string;
-    }>(`${baseUrl}/pulls/${number}/reviews?per_page=100`, token),
+    }>(`${baseUrl}/pulls/${number}/reviews?per_page=100`),
   ]);
   const sinceMs = Date.parse(since);
   return [
@@ -1568,19 +1760,11 @@ export async function fetchPrCommentsSince(repo: string, number: number, since: 
 
 export async function fetchDiff(repo: string, number: number, base?: string, head?: string): Promise<string> {
   if (mockGithub) return mockGithub.diff(repo, number);
-  const token = await ghToken();
   const path = base && head
     ? `/repos/${repo}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}`
     : `/repos/${repo}/pulls/${number}`;
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: {
-      Authorization: `bearer ${token}`,
-      Accept: "application/vnd.github.v3.diff",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`diff fetch failed: ${res.status} ${await res.text()}`);
-  }
+  const res = await githubApiResponse("GET", path, { accept: "application/vnd.github.v3.diff" });
+  if (!res.ok) throw await githubResponseError("diff fetch failed", res);
   return res.text();
 }
 
@@ -1621,14 +1805,12 @@ export interface ActionWorkflow {
 
 export async function fetchActionWorkflows(repo: string): Promise<ActionWorkflow[]> {
   if (mockGithub) return mockGithub.actionWorkflows(repo);
-  const token = await ghToken();
   const workflows: ActionWorkflow[] = [];
   for (let page = 1;; page++) {
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows?per_page=100&page=${page}`, {
-      headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) throw new Error(`workflow catalog fetch failed: ${res.status} ${await res.text()}`);
-    const payload = (await res.json()) as { workflows?: ActionWorkflow[] };
+    const payload = await githubRestJson<{ workflows?: ActionWorkflow[] }>(
+      "GET",
+      `/repos/${repo}/actions/workflows?per_page=100&page=${page}`,
+    );
     const batch = payload.workflows ?? [];
     workflows.push(...batch);
     if (batch.length < 100) return workflows;
@@ -1645,6 +1827,12 @@ export async function rerunFailedJobs(repo: string, runId: number): Promise<void
     `/repos/${encodedRepo(repo)}/actions/runs/${runId}/rerun-failed-jobs`,
   );
   if (response.ok) return;
+  const responseCopy = response.clone();
+  const generation = responseQuotaGenerations.get(response);
+  if (generation !== undefined) responseQuotaGenerations.set(responseCopy, generation);
+  const resource = responseQuotaResources.get(response);
+  if (resource !== undefined) responseQuotaResources.set(responseCopy, resource);
+  const classified = await githubResponseError("GitHub REST request failed", responseCopy);
   const body = await response.text();
   let detail = body;
   try {
@@ -1656,6 +1844,10 @@ export async function rerunFailedJobs(repo: string, runId: number): Promise<void
   throw new RestRequestError(
     `Could not re-run failed jobs${detail ? `: ${detail}` : ` (GitHub ${response.status})`}`,
     response.status,
+    classified.kind,
+    classified.resource,
+    classified.resetAt,
+    classified,
   );
 }
 
@@ -1680,24 +1872,17 @@ export interface WorkflowRun {
 }
 export async function fetchWorkflowRun(repo: string, runId: number): Promise<WorkflowRun> {
   if (mockGithub) return mockGithub.workflowRun(repo, runId);
-  const token = await ghToken();
-  const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs/${runId}`, {
-    headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-  });
-  if (!res.ok) throw new Error(`workflow run fetch failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<WorkflowRun>;
+  return githubRestJson<WorkflowRun>("GET", `/repos/${repo}/actions/runs/${runId}`);
 }
 
 
 export async function fetchWorkflowRuns(repo: string, headSha: string): Promise<WorkflowRun[]> {
-  const token = await ghToken();
   const runs: WorkflowRun[] = [];
   for (let page = 1;; page++) {
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100&page=${page}`, {
-      headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) throw new Error(`workflow runs fetch failed: ${res.status} ${await res.text()}`);
-    const payload = (await res.json()) as { workflow_runs?: WorkflowRun[] };
+    const payload = await githubRestJson<{ workflow_runs?: WorkflowRun[] }>(
+      "GET",
+      `/repos/${repo}/actions/runs?head_sha=${encodeURIComponent(headSha)}&per_page=100&page=${page}`,
+    );
     const batch = payload.workflow_runs ?? [];
     runs.push(...batch);
     if (batch.length < 100) return runs;
@@ -1705,14 +1890,12 @@ export async function fetchWorkflowRuns(repo: string, headSha: string): Promise<
 }
 export async function fetchRecentWorkflowRuns(repo: string, maxPages = 2): Promise<WorkflowRun[]> {
   if (mockGithub) return [];
-  const token = await ghToken();
   const runs: WorkflowRun[] = [];
   for (let page = 1; page <= maxPages; page++) {
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/runs?per_page=100&page=${page}`, {
-      headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) throw new Error(`recent workflow runs fetch failed: ${res.status} ${await res.text()}`);
-    const payload = (await res.json()) as { workflow_runs?: WorkflowRun[] };
+    const payload = await githubRestJson<{ workflow_runs?: WorkflowRun[] }>(
+      "GET",
+      `/repos/${repo}/actions/runs?per_page=100&page=${page}`,
+    );
     const batch = payload.workflow_runs ?? [];
     runs.push(...batch);
     if (batch.length < 100) break;
@@ -1722,14 +1905,12 @@ export async function fetchRecentWorkflowRuns(repo: string, maxPages = 2): Promi
 
 export async function fetchWorkflowRunsForWorkflow(repo: string, workflowId: number, maxPages = 1): Promise<WorkflowRun[]> {
   if (mockGithub) return [];
-  const token = await ghToken();
   const runs: WorkflowRun[] = [];
   for (let page = 1; page <= maxPages; page++) {
-    const res = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/${workflowId}/runs?per_page=100&page=${page}`, {
-      headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) throw new Error(`workflow runs fetch failed: ${res.status} ${await res.text()}`);
-    const payload = (await res.json()) as { workflow_runs?: WorkflowRun[] };
+    const payload = await githubRestJson<{ workflow_runs?: WorkflowRun[] }>(
+      "GET",
+      `/repos/${repo}/actions/workflows/${workflowId}/runs?per_page=100&page=${page}`,
+    );
     const batch = payload.workflow_runs ?? [];
     runs.push(...batch);
     if (batch.length < 100) break;
@@ -1740,17 +1921,12 @@ export async function fetchWorkflowRunsForWorkflow(repo: string, workflowId: num
 
 export async function fetchRunJobs(repo: string, runId: number, attempt?: number): Promise<RunJob[]> {
   if (mockGithub) return mockGithub.runJobs(repo, runId);
-  const token = await ghToken();
   const jobs: RunJob[] = [];
   for (let page = 1;; page++) {
     const endpoint = attempt === undefined
-      ? `https://api.github.com/repos/${repo}/actions/runs/${runId}/jobs?per_page=100&filter=latest&page=${page}`
-      : `https://api.github.com/repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`;
-    const res = await fetch(endpoint, {
-      headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-    });
-    if (!res.ok) throw new Error(`run jobs fetch failed: ${res.status} ${await res.text()}`);
-    const payload = (await res.json()) as { jobs?: RunJob[] };
+      ? `/repos/${repo}/actions/runs/${runId}/jobs?per_page=100&filter=latest&page=${page}`
+      : `/repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100&page=${page}`;
+    const payload = await githubRestJson<{ jobs?: RunJob[] }>("GET", endpoint);
     const batch = payload.jobs ?? [];
     jobs.push(...batch);
     if (batch.length < 100) return jobs;
@@ -1761,15 +1937,24 @@ export async function fetchRunJobs(repo: string, runId: number, attempt?: number
 // rejects a request carrying GitHub's Authorization header, so the download is a second bare fetch.
 export async function fetchJobLog(repo: string, jobId: number): Promise<string> {
   if (mockGithub) return mockGithub.jobLog(repo, jobId);
-  const token = await ghToken();
-  const res = await fetch(`https://api.github.com/repos/${repo}/actions/jobs/${jobId}/logs`, {
-    headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-    redirect: "manual",
-  });
+  const res = await githubApiResponse("GET", `/repos/${repo}/actions/jobs/${jobId}/logs`, { redirect: "manual" });
   const location = res.headers.get("location");
-  if (!location) throw new Error(`job log fetch failed: ${res.status} ${await res.text()}`);
-  const download = await fetch(location);
-  if (!download.ok) throw new Error(`job log download failed: ${download.status}`);
+  if (!location) throw await githubResponseError("job log fetch failed", res);
+  let download: Response;
+  try {
+    download = await fetch(location);
+  } catch (error) {
+    throw new GithubRequestError(
+      `GitHub job log transport unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      503,
+      [],
+      "transport",
+      null,
+      null,
+      error,
+    );
+  }
+  if (!download.ok) throw new GithubRequestError(`job log download failed: ${download.status}`, download.status);
   return download.text();
 }
 
@@ -1783,12 +1968,9 @@ export interface FileHistoryCommit {
 
 export async function fetchFileHistory(repo: string, path: string, base: string): Promise<FileHistoryCommit[]> {
   if (mockGithub) return mockGithub.fileHistory(repo, path, base);
-  const token = await ghToken();
   const params = new URLSearchParams({ sha: base, path, per_page: "30" });
-  const res = await fetch(`https://api.github.com/repos/${repo}/commits?${params}`, {
-    headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-  });
-  if (!res.ok) throw new Error(`file history fetch failed: ${res.status} ${await res.text()}`);
+  const res = await githubApiResponse("GET", `/repos/${repo}/commits?${params}`);
+  if (!res.ok) throw await githubResponseError("file history fetch failed", res);
   const commits = (await res.json()) as Array<{
     sha: string;
     commit: { message: string; author: { name: string; date: string } | null };
@@ -1817,11 +1999,8 @@ export interface FileHistoryDiff {
 
 export async function fetchFileHistoryDiff(repo: string, sha: string, path: string): Promise<FileHistoryDiff | null> {
   if (mockGithub) return mockGithub.fileHistoryDiff(repo, sha, path);
-  const token = await ghToken();
-  const res = await fetch(`https://api.github.com/repos/${repo}/commits/${sha}`, {
-    headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-  });
-  if (!res.ok) throw new Error(`commit fetch failed: ${res.status} ${await res.text()}`);
+  const res = await githubApiResponse("GET", `/repos/${repo}/commits/${sha}`);
+  if (!res.ok) throw await githubResponseError("commit fetch failed", res);
   const body = (await res.json()) as {
     files?: Array<{
       filename: string;
@@ -1848,14 +2027,9 @@ export type FileContents = { content: string } | { tooLarge: true };
 
 export async function fetchFileContents(repo: string, path: string, sha: string): Promise<FileContents> {
   if (mockGithub) return mockGithub.fileContents(repo, path, sha);
-  const token = await ghToken();
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
-  const res = await fetch(`https://api.github.com/repos/${repo}/contents/${encodedPath}?ref=${sha}`, {
-    headers: { Authorization: `bearer ${token}`, Accept: "application/vnd.github+json" },
-  });
-  if (!res.ok) {
-    throw new Error(`file fetch failed: ${res.status} ${await res.text()}`);
-  }
+  const res = await githubApiResponse("GET", `/repos/${repo}/contents/${encodedPath}?ref=${sha}`);
+  if (!res.ok) throw await githubResponseError("file fetch failed", res);
   const body = (await res.json()) as { content?: string; encoding?: string };
   if (Array.isArray(body) || body.encoding !== "base64") return { tooLarge: true };
   return { content: strictUtf8Decoder.decode(Buffer.from(body.content ?? "", "base64")) };
@@ -1887,26 +2061,12 @@ type RestTreeEntry = {
 };
 
 async function githubRestResponse(method: string, path: string, body?: unknown): Promise<Response> {
-  const token = await ghToken();
-  return fetch(`https://api.github.com${path}`, {
-    method,
-    headers: {
-      Authorization: `bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  return githubApiResponse(method, path, { body });
 }
 
 async function githubRestJson<T>(method: string, path: string, body?: unknown): Promise<T> {
   const response = await githubRestResponse(method, path, body);
-  if (!response.ok) {
-    throw new GithubRequestError(
-      `GitHub REST request failed: ${response.status} ${await response.text()}`,
-      response.status === 404 ? 404 : 502,
-    );
-  }
+  if (!response.ok) throw await githubResponseError("GitHub REST request failed", response);
   return response.json() as Promise<T>;
 }
 
@@ -1991,9 +2151,16 @@ export async function commitPrFileEdit(input: PrFileEdit): Promise<{ commitOid: 
   return { commitOid: nextCommit.sha };
 }
 
-export class RestRequestError extends Error {
-  constructor(message: string, readonly status: number) {
-    super(message);
+export class RestRequestError extends GithubRequestError {
+  constructor(
+    message: string,
+    status: number,
+    kind: GithubRequestErrorKind = "http",
+    resource: GithubQuotaResourceName | null = null,
+    resetAt: string | null = null,
+    cause?: unknown,
+  ) {
+    super(message, status, [], kind, resource, resetAt, cause);
     this.name = "RestRequestError";
   }
 }
@@ -2002,7 +2169,8 @@ async function restRequest(method: string, path: string, body: unknown): Promise
   if (mockGithub) return;
   const response = await githubRestResponse(method, path, body);
   if (!response.ok) {
-    throw new RestRequestError(`${method} ${path} failed: ${response.status} ${await response.text()}`, response.status);
+    const error = await githubResponseError(`${method} ${path} failed`, response);
+    throw new RestRequestError(error.message, error.status, error.kind, error.resource, error.resetAt, error);
   }
 }
 
@@ -2015,7 +2183,8 @@ export async function postIssueComment(repo: string, number: number, body: strin
   const path = `/repos/${repo}/issues/${number}/comments`;
   const response = await githubRestResponse("POST", path, { body });
   if (!response.ok) {
-    throw new RestRequestError(`POST ${path} failed: ${response.status} ${await response.text()}`, response.status);
+    const error = await githubResponseError(`POST ${path} failed`, response);
+    throw new RestRequestError(error.message, error.status, error.kind, error.resource, error.resetAt, error);
   }
   const result: unknown = await response.json();
   if (!result || typeof result !== "object" || !("node_id" in result) || typeof result.node_id !== "string") {

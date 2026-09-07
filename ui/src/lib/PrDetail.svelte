@@ -19,7 +19,6 @@
     promptAgent,
     autofixAgent,
     customAgent,
-    rescoreAgent,
     fetchRepoUsers,
     switchLocalBranch,
   } from "./api.js";
@@ -243,6 +242,7 @@
   let diffFetch;
   let loadedDiffKey = null;
   let displayedDiffKey = $state(null);
+  let diffError = $state("");
   let buildingKey = "";
   let buildingDeadline = 0;
   const BUILD_CAP_MS = 120_000;
@@ -301,22 +301,25 @@
         }
         if (Date.now() >= buildingDeadline) {
           diffState = "error";
+          diffError = "Git mirror is still loading. Try again shortly.";
           buildingKey = "";
         } else {
           diffState = "building";
           retryTimer = setTimeout(() => diffNonce++, res.retryAfterMs);
         }
-      } else if (rewrittenSince) {
+      } else if (rewrittenSince && res.status === 404) {
         rangeKey = "all";
         rewriteFallback = true;
       } else {
         files = [];
         diffState = "error";
+        diffError = res.error;
         buildingKey = "";
       }
-    }).catch(() => {
+    }).catch((error) => {
       if (diffFetch !== token) return;
       diffState = "error";
+      diffError = error instanceof Error ? error.message : "Couldn’t load this diff.";
       buildingKey = "";
     });
     return () => {
@@ -815,8 +818,8 @@
 
   function requestCustomAgent(def) {
     confirmAction = {
-      title: def.id === "rescorer" ? `Re-score #${number}?` : `Arm the "${def.name || "custom"}" agent for #${number}?`,
-      confirmLabel: def.id === "rescorer" ? "Re-score" : "Arm agent",
+      title: `Arm the "${def.name || "custom"}" agent for #${number}?`,
+      confirmLabel: "Arm agent",
       run: () => submitCustom(def),
     };
   }
@@ -1056,16 +1059,12 @@
   let customError = $state(null);
 
   async function submitCustom(agentDef) {
-    if (customBusy || (agentDef.id !== "rescorer" && agent?.state === "running")) return;
+    if (customBusy || agent?.state === "running") return;
     customBusy = true;
     customError = null;
     try {
-      if (agentDef.id === "rescorer") {
-        await rescoreAgent(repo, number);
-      } else {
-        await customAgent(repo, number, agentDef.id);
-        await loadAgent();
-      }
+      await customAgent(repo, number, agentDef.id);
+      await loadAgent();
     } catch (e) {
       customError = e instanceof Error ? e.message : String(e);
     } finally {
@@ -1411,7 +1410,7 @@
     }
     for (const c of pr.comments.nodes) {
       const who = c.author?.login;
-      if (who && KNOWN_BOT_LOGINS.has(who) && !latest.has(who)) latest.set(who, { state: "COMMENTED", avatarUrl: c.author.avatarUrl });
+      if (who && (KNOWN_BOT_LOGINS.has(who) || pr.reviewerScores?.[who]) && !latest.has(who)) latest.set(who, { state: "COMMENTED", avatarUrl: c.author.avatarUrl });
     }
     for (const req of pr.reviewRequests.nodes) {
       const who = req.requestedReviewer?.login ?? req.requestedReviewer?.name;
@@ -1433,10 +1432,8 @@
 
   let greptileMeta = $derived(pr ? greptileReviewMeta(pr) : { confidence: null, reviewedSha: null, unresolvedCount: 0 });
   let greptileState = $derived(pr ? greptileStatus(greptileMeta, pr.headRefOid) : null);
-  let greptileRescore = $derived(pr?.greptileRescore ?? null);
 
   function greptileTitle(status) {
-    if (greptileRescore) return `original ${greptileMeta.confidence}/5 by greptile-apps → ${greptileRescore.score}/5 re-scored after fixes`;
     if (status === "stale") return "reviewed before recent pushes - the score may no longer reflect the current state";
     if (status === "addressed") return "reviewed before recent pushes, but every thread that reviewer left is resolved";
     return "Greptile confidence";
@@ -2024,8 +2021,6 @@
           if (!autoMergeMutation) requestAutoMerge();
         } else if (def.id === "autofix") {
           if (!autofixBusy && agent?.state !== "running" && !prIsGreen && !mergedState) requestAutofix();
-        } else if (def.id === "rescorer") {
-          if (!customBusy) requestCustomAgent(def);
         } else if (!customBusy && agent?.state !== "running") {
           requestCustomAgent(def);
         }
@@ -2078,7 +2073,6 @@
     keybindAgents.flatMap((a) => {
       if (a.id === "fixer") return [];
       if (a.id === "autofix") return agent?.state !== "running" && !prIsGreen && !mergedState ? [{ key: a.keybind, label: "auto-fix" }] : [];
-      if (a.id === "rescorer") return [{ key: a.keybind, label: "re-score" }];
       return agent?.state !== "running" ? [{ key: a.keybind, label: a.name || "custom agent" }] : [];
     }),
   );
@@ -2531,7 +2525,7 @@
             {/if}
             {#if diffState === "error"}
               <div class="diff-status">
-                Couldn’t load this diff.
+                {diffError}
                 <button class="retry-btn" onclick={retryDiff}>Retry</button>
               </div>
             {:else if diffState === "building"}
@@ -3085,24 +3079,19 @@
                   {#if reviewer.login === "greptile-apps" && greptileMeta.confidence != null}
                     <span
                       class="greptile"
-                      class:stale={!greptileRescore && greptileState === "stale"}
-                      class:addressed={!greptileRescore && greptileState === "addressed"}
-                      class:rescored={!!greptileRescore}
+                      class:stale={greptileState === "stale"}
+                      class:addressed={greptileState === "addressed"}
                       title={greptileTitle(greptileState)}
                     >
-                      {greptileRescore ? greptileRescore.score : greptileMeta.confidence}/5{#if greptileRescore} · rescored{:else if greptileState} · {greptileState}{/if}
+                      {greptileMeta.confidence}/5{#if greptileState} · {greptileState}{/if}
                     </span>
                   {:else if reviewer.login !== "greptile-apps" && pr.reviewerScores?.[reviewer.login]}
                     {@const rs = pr.reviewerScores[reviewer.login]}
-                    {#if rs.score != null}
-                      <span
-                        class="greptile"
-                        class:stale={rs.stale}
-                        title={rs.stale ? "reviewed before recent pushes - the score may no longer reflect the current state" : (rs.basis ?? "parsed review score")}
-                      >{rs.score}/5{#if rs.stale} · stale{/if}</span>
-                    {:else}
-                      <span class="greptile unscored" title="no quality verdict found in this review">no verdict</span>
-                    {/if}
+                    <span
+                      class="greptile"
+                      class:stale={rs.stale}
+                      title={rs.stale ? "reviewed before recent pushes - the score may no longer reflect the current state" : "parsed review score"}
+                    >{rs.score}/5{#if rs.stale} · stale{/if}</span>
                   {/if}
                 </div>
               {/each}
@@ -4389,15 +4378,6 @@
     color: var(--ready);
     border-color: var(--ready);
     opacity: 0.85;
-  }
-  .greptile.rescored {
-    color: var(--ready);
-    border-color: var(--ready);
-    font-weight: 600;
-  }
-  .greptile.unscored {
-    color: var(--text-faint);
-    opacity: 0.6;
   }
   .check-summary {
     font-size: 11.5px;

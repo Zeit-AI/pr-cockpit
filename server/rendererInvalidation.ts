@@ -1,7 +1,9 @@
 export type RendererInvalidation =
   | { type: "poll-complete"; lastPollAt: string }
   | { type: "inbox" }
-  | { type: "pr"; repo: string; number: number };
+  | { type: "pr"; repo: string; number: number }
+  | { type: "notifications" }
+  | { type: "notification-settings" };
 
 let publish = (_event: RendererInvalidation): void => {};
 
@@ -19,4 +21,12 @@ export function publishPollCompleted(lastPollAt: string): void {
 
 export function invalidatePr(repo: string, number: number): void {
   publish({ type: "pr", repo, number });
+}
+
+export function invalidateNotifications(): void {
+  publish({ type: "notifications" });
+}
+
+export function invalidateNotificationSettings(): void {
+  publish({ type: "notification-settings" });
 }

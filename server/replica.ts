@@ -1,5 +1,6 @@
 import type { Subprocess } from "bun";
-import { readInboxReplica, replaceInboxReplica, type InboxReplica } from "./db.ts";
+import { getPr, readInboxReplica, replaceInboxReplica, type InboxReplica, type PrRow } from "./db.ts";
+import { observePrNotifications } from "./notifications.ts";
 import { setLastPollAt, lastPollAt } from "./poller.ts";
 import { invalidateInbox, publishPollCompleted } from "./rendererInvalidation.ts";
 import { readSettings } from "./settings.ts";
@@ -15,6 +16,7 @@ const LOCAL_API_PATHS = new Set([
   "/api/repo-users",
   "/api/search-prs",
   "/api/settings",
+  "/api/notifications/claim",
   "/api/version",
   "/api/update",
   "/api/shutdown",
@@ -65,8 +67,6 @@ function parseReplicaSnapshot(value: unknown): ReplicaSnapshot {
     || !("pr_index" in tables) || !isReplicaRows(tables.pr_index)
     || !("pr_rank" in tables) || !isReplicaRows(tables.pr_rank)
     || !("repo_users" in tables) || !isReplicaRows(tables.repo_users)
-    || !("review_rescores" in tables) || !isReplicaRows(tables.review_rescores)
-    || !("review_scores" in tables) || !isReplicaRows(tables.review_scores)
     || !("fixer_agents" in tables) || !isReplicaRows(tables.fixer_agents)) {
     throw new Error("Replica source returned invalid table rows");
   }
@@ -80,8 +80,6 @@ function parseReplicaSnapshot(value: unknown): ReplicaSnapshot {
       pr_index: tables.pr_index,
       pr_rank: tables.pr_rank,
       repo_users: tables.repo_users,
-      review_rescores: tables.review_rescores,
-      review_scores: tables.review_scores,
       fixer_agents: tables.fixer_agents,
     },
   };
@@ -151,6 +149,21 @@ async function ensureTunnel(): Promise<void> {
   state = { ...state, host, connected: true, lastError: null };
 }
 
+export function importInboxReplica(tables: InboxReplica): void {
+  const previousPrs = new Map<string, PrRow | null>();
+  for (const row of tables.prs) {
+    if (typeof row.repo === "string" && typeof row.number === "number") {
+      previousPrs.set(`${row.repo}\0${row.number}`, getPr(row.repo, row.number));
+    }
+  }
+  replaceInboxReplica(tables);
+  for (const row of tables.prs) {
+    if (typeof row.repo !== "string" || typeof row.number !== "number") continue;
+    const next = getPr(row.repo, row.number);
+    if (next) observePrNotifications(previousPrs.get(`${row.repo}\0${row.number}`) ?? null, next);
+  }
+}
+
 async function syncReplica(): Promise<void> {
   if (syncInFlight) return syncInFlight;
   syncInFlight = (async () => {
@@ -171,7 +184,7 @@ async function syncReplica(): Promise<void> {
       }
       if (!response.ok) throw new Error(`replica source returned ${response.status}: ${await response.text()}`);
       const snapshot = parseReplicaSnapshot(await response.json());
-      replaceInboxReplica(snapshot.tables);
+      importInboxReplica(snapshot.tables);
       setLastPollAt(snapshot.lastPollAt);
       state = {
         host: replicaSshHost(),

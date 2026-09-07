@@ -79,6 +79,20 @@ CREATE TABLE IF NOT EXISTS settings (
   value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS desktop_notifications (
+  id TEXT PRIMARY KEY,
+  event_json TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT NOT NULL,
+  repo TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  claimed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS desktop_notifications_pending_idx
+ON desktop_notifications (claimed_at, created_at);
+
 CREATE TABLE IF NOT EXISTS github_graphql_usage (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   occurred_at TEXT NOT NULL,
@@ -164,17 +178,6 @@ CREATE TABLE IF NOT EXISTS pr_webhook_activity (
   PRIMARY KEY (repo, number)
 );
 
-CREATE TABLE IF NOT EXISTS review_rescores (
-  repo TEXT NOT NULL,
-  number INTEGER NOT NULL,
-  reviewer TEXT NOT NULL,
-  review_sha TEXT NOT NULL,
-  head_sha TEXT NOT NULL,
-  score REAL NOT NULL,
-  verdicts_json TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (repo, number, reviewer, review_sha, head_sha)
-);
 
 CREATE TABLE IF NOT EXISTS workflow_runs (
   repo TEXT NOT NULL,
@@ -254,6 +257,8 @@ CREATE TABLE IF NOT EXISTS run_jobs (
 
 CREATE INDEX IF NOT EXISTS run_jobs_sha_idx ON run_jobs (repo, head_sha, run_id, run_attempt);
 `);
+
+db.exec("DROP TABLE IF EXISTS review_rescores; DROP TABLE IF EXISTS review_scores;");
 
 let workflowRunColumns = db.query("PRAGMA table_info(workflow_runs)").all() as Array<{ name: string; notnull: number }>;
 const workflowRunPrNumber = workflowRunColumns.find((column) => column.name === "pr_number");
@@ -713,52 +718,6 @@ export function lastWebhookAtForPr(repo: string, number: number): string | null 
   return lastWebhookAtForPrStmt.get(repo, number)?.received_at ?? null;
 }
 
-export interface RescoreRow {
-  repo: string;
-  number: number;
-  reviewer: string;
-  review_sha: string;
-  head_sha: string;
-  score: number;
-  verdicts_json: string;
-  created_at: string;
-}
-
-const getRescoreStmt = db.prepare<RescoreRow, [string, number, string, string, string]>(
-  "SELECT * FROM review_rescores WHERE repo = ? AND number = ? AND reviewer = ? AND review_sha = ? AND head_sha = ?",
-);
-
-export function getRescoreFor(repo: string, number: number, reviewer: string, reviewSha: string, headSha: string): RescoreRow | null {
-  return getRescoreStmt.get(repo, number, reviewer, reviewSha, headSha) ?? null;
-}
-
-const insertRescoreStmt = db.prepare(`
-INSERT INTO review_rescores (repo, number, reviewer, review_sha, head_sha, score, verdicts_json, created_at)
-VALUES ($repo, $number, $reviewer, $review_sha, $head_sha, $score, $verdicts_json, $created_at)
-ON CONFLICT (repo, number, reviewer, review_sha, head_sha) DO NOTHING
-`);
-
-// a triple is scored at most once - re-running a scored triple would defeat the whole point of memoizing it
-export function insertRescore(row: RescoreRow): void {
-  insertRescoreStmt.run({
-    $repo: row.repo,
-    $number: row.number,
-    $reviewer: row.reviewer,
-    $review_sha: row.review_sha,
-    $head_sha: row.head_sha,
-    $score: row.score,
-    $verdicts_json: row.verdicts_json,
-    $created_at: row.created_at,
-  });
-}
-
-const latestRescoreForHeadStmt = db.prepare<RescoreRow, [string, number, string]>(
-  "SELECT * FROM review_rescores WHERE repo = ? AND number = ? AND head_sha = ? ORDER BY created_at DESC LIMIT 1",
-);
-
-export function latestRescoreForHead(repo: string, number: number, headSha: string): RescoreRow | null {
-  return latestRescoreForHeadStmt.get(repo, number, headSha) ?? null;
-}
 
 // cockpit no longer calls GitHub's own auto-merge mutation, so this is the sole source of truth for "armed"
 export function setAutoMergeArmed(repo: string, number: number, armed: boolean): void {
@@ -1734,8 +1693,6 @@ const REPLICA_TABLES = [
   "pr_index",
   "pr_rank",
   "repo_users",
-  "review_rescores",
-  "review_scores",
   "fixer_agents",
 ] as const;
 

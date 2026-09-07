@@ -3,17 +3,20 @@ import { chmodSync, constants, copyFileSync, existsSync, linkSync, lstatSync, mk
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
 import { reportInstallFailure } from "./installFailure.ts";
-async function exitLifecycleFailure(error: unknown): Promise<never> {
+class ReportedInstallFailure extends Error {}
+const REPORTED_INSTALL_FAILURE_EXIT = 86;
+export async function exitLifecycleFailure(error: unknown, fallbackStage = process.argv[2] ?? "Initialize"): Promise<never> {
   const messages = errorMessages(error);
   for (const message of messages) console.error(`pr-cockpit: ${message}`);
-  if (Bun.env.COCKPIT_INSTALL_REPORT_CHILD !== "1") {
+  if (!(error instanceof ReportedInstallFailure)) {
     await reportInstallFailure({
-      stage: process.argv[2] ?? "Initialize",
+      stage: Bun.env.COCKPIT_INSTALL_REPORT_STAGE ?? fallbackStage,
       status: 1,
       platform: process.platform,
+      detail: messages.join("\n"),
     });
   }
-  process.exit(1);
+  process.exit(Bun.env.COCKPIT_INSTALL_REPORT_CHILD === "1" ? REPORTED_INSTALL_FAILURE_EXIT : 1);
 }
 if (import.meta.main) process.once("uncaughtException", (error) => void exitLifecycleFailure(error));
 if (process.getuid?.() === 0) throw new Error("Linux lifecycle must not run as root");
@@ -1083,12 +1086,18 @@ export function runLifecycle(argv: string[], options: { platform?: NodeJS.Platfo
     const childArgs = [command("bun"), join(transaction.release, "scripts/linux-lifecycle.ts"), "activate", transaction.release, source, transaction.generation, transaction.revision];
     if (args.includes("--gui")) childArgs.push("--gui");
     const activated = Bun.spawnSync(childArgs, {
-      env: { ...process.env, COCKPIT_INSTALL_REPORT_CHILD: "1" },
+      env: { ...process.env, COCKPIT_INSTALL_REPORT_CHILD: "1", COCKPIT_INSTALL_REPORT_STAGE: "install" },
       stdin: "inherit",
       stdout: "inherit",
       stderr: "inherit",
     });
-    if (activated.exitCode !== 0) throw new Error("immutable release activation failed");
+    if (activated.exitCode === REPORTED_INSTALL_FAILURE_EXIT && !activated.signalCode) {
+      throw new ReportedInstallFailure("immutable release activation failed");
+    }
+    if (activated.exitCode !== 0) {
+      const termination = activated.signalCode ? `signal ${activated.signalCode}` : `exit ${activated.exitCode}`;
+      throw new Error(`immutable release activation failed before diagnostics (${termination})`);
+    }
   }
   else if (action === "uninstall") withLifecycleLock(() => uninstall(args.includes("--purge")));
   else usage();

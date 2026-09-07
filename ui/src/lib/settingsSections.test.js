@@ -7,6 +7,7 @@ describe("settings sections", () => {
     expect(normalizeSettingsSection("appearance")).toBe("appearance");
     expect(normalizeSettingsSection("usage")).toBe("usage");
     expect(normalizeSettingsSection("advanced")).toBe("advanced");
+    expect(normalizeSettingsSection("notifications")).toBe("notifications");
     expect(normalizeSettingsSection("analytics")).toBe("analytics");
     expect(normalizeSettingsSection("missing")).toBe("general");
     expect(normalizeSettingsSection(null)).toBe("general");
@@ -14,6 +15,7 @@ describe("settings sections", () => {
 
   test("builds canonical section routes", () => {
     expect(settingsSectionHref("keybinds")).toBe("#/settings/keybinds");
+    expect(settingsSectionHref("notifications")).toBe("#/settings/notifications");
     expect(settingsSectionHref("analytics")).toBe("#/settings/analytics");
     expect(settingsSectionHref("missing")).toBe("#/settings/general");
   });

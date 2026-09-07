@@ -45,7 +45,10 @@ export async function reorderPr(repo, number, position) {
 
 export async function fetchPrDetail(repo, number) {
   const res = await fetch(`/api/pr/${repo}/${number}`);
-  if (!res.ok) throw new Error(`detail ${res.status}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => null);
+    throw new Error(body?.error || `detail ${res.status}`);
+  }
   return res.json();
 }
 function actionCommitQuery(sha, prefetch = false) {
@@ -147,13 +150,15 @@ export async function fetchPrDiff(repo, number, range = null, signal = null) {
     if (range?.head) params.set("head", range.head);
     const qs = params.size ? `?${params}` : "";
     const res = await fetch(`/api/pr/${repo}/${number}/diff${qs}`, { signal });
-    if (res.status === 503) {
-      return { ok: false, building: true, retryAfterMs: (Number(res.headers.get("retry-after")) || 5) * 1000 };
+    if (res.ok) return { ok: true, bytes: await res.arrayBuffer() };
+    const body = await res.json().catch(() => null);
+    const error = body?.error || `Diff request failed (${res.status})`;
+    if (res.status === 503 && body?.building === true) {
+      return { ok: false, building: true, error, retryAfterMs: (Number(res.headers.get("retry-after")) || 5) * 1000 };
     }
-    if (!res.ok) return { ok: false, building: false };
-    return { ok: true, bytes: await res.arrayBuffer() };
-  } catch {
-    return { ok: false, building: false };
+    return { ok: false, building: false, status: res.status, error };
+  } catch (error) {
+    return { ok: false, building: false, error: error instanceof Error ? error.message : "Diff request failed" };
   }
 }
 
@@ -344,7 +349,14 @@ export async function saveSettings(patch) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
   });
-  if (!res.ok) throw new Error(`settings ${res.status}`);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error || `settings ${res.status}`);
+  return body;
+}
+
+export async function claimNotifications() {
+  const res = await fetch("/api/notifications/claim", { method: "POST" });
+  if (!res.ok) throw new Error(`notifications ${res.status}`);
   return res.json();
 }
 export async function refreshInbox() {
@@ -459,14 +471,6 @@ export async function customAgent(repo, number, agentId) {
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `custom agent ${res.status}`);
 }
 
-export async function rescoreAgent(repo, number) {
-  const res = await fetch("/api/agents/rescore", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ repo, number }),
-  });
-  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `rescore agent ${res.status}`);
-}
 
 export async function fetchAgentLog(repo, number) {
   const res = await fetch(`/api/agents/log?repo=${encodeURIComponent(repo)}&number=${number}`);

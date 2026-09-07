@@ -12,7 +12,6 @@
       .map((a) => {
         if (a.id === "fixer") return { key: a.keybind, label: "auto-merge" };
         if (a.id === "autofix") return { key: a.keybind, label: "auto-fix" };
-        if (a.id === "rescorer") return { key: a.keybind, label: "re-score review" };
         return { key: a.keybind, label: a.name || "custom agent" };
       }),
   );

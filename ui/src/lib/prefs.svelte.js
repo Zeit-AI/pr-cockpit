@@ -8,6 +8,7 @@ export const prefs = $state({
   newestCommentsFirst: false,
   testPathRegex: "",
   diffLayout: "split",
+  notificationsEnabled: false,
   agents: [
     { id: "fixer", name: "Auto-merge fixer", enabled: true, trigger: "keybind", keybind: "a", model: "opus", prompt_template: "" },
     { id: "autofix", name: "Auto-fix", enabled: true, trigger: "keybind", keybind: "f", model: "opus", prompt_template: "" },
@@ -21,6 +22,7 @@ export function setPrefs(settings) {
   prefs.testPathRegex = settings.test_path_regex;
   prefs.diffLayout = settings.diff_layout === "unified" ? "unified" : "split";
   prefs.agents = settings.agents;
+  prefs.notificationsEnabled = settings.notifications?.enabled === true;
   prefs.loaded = true;
 }
 

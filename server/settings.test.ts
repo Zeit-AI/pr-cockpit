@@ -58,13 +58,51 @@ describe("mergeAgents", () => {
     expect(merged).toEqual(AGENT_DEFAULTS);
   });
 
-  test("malformed field types fall back per field", () => {
-    const merged = mergeAgents([{ id: "rescorer", enabled: "nope", prompt_template: 42 }]);
-    const rescorer = merged.find((a) => a.id === "rescorer")!;
-    expect(rescorer.enabled).toBe(true);
-    expect(rescorer.prompt_template).toBe("");
-    expect(rescorer.model).toBe("sonnet");
+  test("a crafted retired rescorer entry is dropped", () => {
+    expect(mergeAgents([{ id: "rescorer", enabled: true, trigger: "keybind", keybind: "r" }])).toEqual(AGENT_DEFAULTS);
   });
+});
+
+test("seed and API writes permanently filter the retired rescorer without changing other agents", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-retired-rescorer-"));
+  const settingsModuleUrl = new URL("./settings.ts", import.meta.url).href;
+  const dbModuleUrl = new URL("./db.ts", import.meta.url).href;
+  const scenario = `
+    const { db, getSetting, setSetting } = await import(${JSON.stringify(dbModuleUrl)});
+    const { readSettings, seedSettings, writeSettings } = await import(${JSON.stringify(settingsModuleUrl)});
+    const fixer = { id: "fixer", name: "Kept fixer", enabled: false, trigger: "activity", keybind: "z", model: "sonnet", prompt_template: "keep me" };
+    const custom = { id: "custom-kept", name: "Kept custom", enabled: true, trigger: "keybind", keybind: "k", model: "opus", prompt_template: "also keep me" };
+    const rescorer = { id: "rescorer", name: "Retired", enabled: true, trigger: "activity", keybind: null, model: "sonnet", prompt_template: "remove me" };
+    setSetting("agents", JSON.stringify([fixer, rescorer, custom]));
+    seedSettings();
+    const stored = JSON.parse(getSetting("agents"));
+    const served = readSettings().agents;
+    const written = writeSettings({ agents: [fixer, rescorer, custom] }).agents;
+    console.log(JSON.stringify({ stored, served, written }));
+    db.close();
+  `;
+
+  try {
+    const process = Bun.spawn([Bun.which("bun") ?? "bun", "-e", scenario], {
+      env: { ...Bun.env, COCKPIT_DATA_DIR: dataDir },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      process.exited,
+      new Response(process.stdout).text(),
+      new Response(process.stderr).text(),
+    ]);
+    if (exitCode !== 0) throw new Error(stderr);
+    const result = JSON.parse(stdout);
+    expect(result.stored.map((agent: { id: string }) => agent.id)).toEqual(["fixer", "custom-kept"]);
+    expect(result.served.map((agent: { id: string }) => agent.id)).toEqual(["fixer", "autofix", "custom-kept"]);
+    expect(result.written.map((agent: { id: string }) => agent.id)).toEqual(["fixer", "autofix", "custom-kept"]);
+    expect(result.stored[0]).toEqual(expect.objectContaining({ name: "Kept fixer", enabled: false, prompt_template: "keep me" }));
+    expect(result.stored[1]).toEqual(expect.objectContaining({ name: "Kept custom", prompt_template: "also keep me" }));
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 describe("normalizeThemePreference", () => {

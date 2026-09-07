@@ -156,7 +156,7 @@ test("WebSocket frames replay markers, initialize cursors, and await reset recon
           queueMicrotask(() => {
             this.emit("open");
             for (const frame of frames) this.emit("message", { data: JSON.stringify(frame) });
-            this.emit("close");
+            this.emit("close", { code: 1000, reason: "relay restart" });
           });
         }
         addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
@@ -182,7 +182,7 @@ test("WebSocket frames replay markers, initialize cursors, and await reset recon
           fullPoll: async () => { order.push("poll:" + getSetting("relay_cursor")); },
         });
       } catch (error) {
-        if (error.message !== "relay WebSocket closed") throw error;
+        if (error.message !== "relay WebSocket closed (code=1000, reason=relay restart)") throw error;
       }
       order.push("done:" + getSetting("relay_cursor"));
       db.query("DELETE FROM settings WHERE key = 'relay_cursor'").run();
@@ -194,7 +194,7 @@ test("WebSocket frames replay markers, initialize cursors, and await reset recon
           },
         });
       } catch (error) {
-        if (error.message !== "relay WebSocket closed") throw error;
+        if (error.message !== "relay WebSocket closed (code=1000, reason=relay restart)") throw error;
       }
       const initialized = getSetting("relay_cursor");
       setSetting("relay_cursor", "20");
@@ -207,7 +207,7 @@ test("WebSocket frames replay markers, initialize cursors, and await reset recon
           fullPoll: async () => { order.push("rewind:" + getSetting("relay_cursor")); },
         });
       } catch (error) {
-        if (error.message !== "relay WebSocket closed") throw error;
+        if (error.message !== "relay WebSocket closed (code=1000, reason=relay restart)") throw error;
       }
       console.log(JSON.stringify({ seen, order, urls, initialized, rewound: getSetting("relay_cursor") }));
       db.close();
@@ -306,11 +306,12 @@ test("advertised WebSocket failures reconnect without polling and URL changes re
   }
 });
 
-test("active WebSocket sessions restart when tracked repositories are added or removed", async () => {
+test("active WebSocket sessions reconfigure locally without hiding a later peer close", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-relay-repos-"));
   try {
     const script = `
-      console.error = () => {};
+      const errors = [];
+      console.error = (...args) => errors.push(args.map((arg) => arg instanceof Error ? arg.message : String(arg)).join(" "));
       const { createRelayConnection } = await import(${JSON.stringify(relayClientUrl)});
       const { db } = await import(${JSON.stringify(dbUrl)});
       class ActiveSocket {
@@ -318,12 +319,12 @@ test("active WebSocket sessions restart when tracked repositories are added or r
         constructor() { queueMicrotask(() => this.emit("open")); }
         addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
         emit(type, event) { for (const listener of this.listeners[type] ?? []) listener(event); }
-        close() { this.emit("close"); }
+        close() { this.emit("close", { code: 1000, reason: "client reconfigure" }); }
       }
       let repos = ["acme/app"];
       const sessionRepos = [];
       const sockets = [];
-      const created = [Promise.withResolvers(), Promise.withResolvers(), Promise.withResolvers()];
+      const created = [Promise.withResolvers(), Promise.withResolvers(), Promise.withResolvers(), Promise.withResolvers()];
       const fetcher = async (input, init = {}) => {
         const url = String(input);
         if (url.endsWith("/capabilities")) return Response.json({ stream: "websocket-v1" });
@@ -354,9 +355,11 @@ test("active WebSocket sessions restart when tracked repositories are added or r
       repos = ["acme/tools"];
       ticks.push(connection.tick("https://stream.test"));
       await created[2].promise;
-      sockets[2].close();
+      ticks.push(connection.tick("https://other-stream.test"));
+      await created[3].promise;
+      sockets[3].emit("close", { code: 1000, reason: "server maintenance" });
       await Promise.all(ticks);
-      console.log(JSON.stringify({ sessionRepos, socketCount: sockets.length }));
+      console.log(JSON.stringify({ sessionRepos, socketCount: sockets.length, errors }));
       db.close();
     `;
     const process = Bun.spawn([Bun.which("bun") ?? "bun", "-e", script], {
@@ -371,8 +374,10 @@ test("active WebSocket sessions restart when tracked repositories are added or r
       ["acme/app"],
       ["acme/app", "acme/tools"],
       ["acme/tools"],
+      ["acme/tools"],
     ]);
-    expect(result.socketCount).toBe(3);
+    expect(result.socketCount).toBe(4);
+    expect(result.errors).toEqual(["relay stream failed: relay WebSocket closed (code=1000, reason=server maintenance)"]);
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }

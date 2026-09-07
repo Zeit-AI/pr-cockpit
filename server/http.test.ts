@@ -187,6 +187,17 @@ describe("health", () => {
   });
 });
 
+describe("retired score agent route", () => {
+  test("cannot be launched through HTTP", async () => {
+    const response = await buildFetchHandler(4820)(new Request("http://127.0.0.1:4820/api/agents/rescore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo: "example-org/webapp", number: 6133 }),
+    }));
+    expect(response.status).toBe(404);
+  });
+});
+
 describe("all PRs", () => {
   const url = "http://127.0.0.1:4820/api/all-prs";
   const row = {
@@ -391,6 +402,47 @@ describe("merged PR analytics", () => {
   });
 });
 
+test("file reads preserve transport and quota failures instead of reporting missing files", async () => {
+  const root = mkdtempSync(join(tmpdir(), "cockpit-http-file-errors-"));
+  const gh = join(root, "gh");
+  writeFileSync(gh, "#!/bin/sh\nprintf 'fixture-token\\n'\n", { mode: 0o755 });
+  const moduleUrl = new URL("./http.ts", import.meta.url).href;
+  try {
+    const script = `
+      import { buildFetchHandler } from ${JSON.stringify(moduleUrl)};
+      const handler = buildFetchHandler(4820);
+      const request = () => new Request("http://127.0.0.1:4820/api/file?repo=example/widgets&path=src/value.ts&sha=${"a".repeat(40)}");
+      globalThis.fetch = async () => { throw new TypeError("socket closed"); };
+      const unavailable = await handler(request());
+      const resetAt = Math.floor(Date.now() / 1000) + 600;
+      globalThis.fetch = async () => Response.json({ message: "API rate limit exceeded" }, {
+        status: 403, headers: { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(resetAt), "x-ratelimit-resource": "core" },
+      });
+      const limited = await handler(request());
+      console.log(JSON.stringify({
+        unavailable: { status: unavailable.status, body: await unavailable.json() },
+        limited: { status: limited.status, body: await limited.json(), retryAfter: limited.headers.get("retry-after") },
+      }));
+    `;
+    const child = Bun.spawn([process.execPath, "-e", script], {
+      env: { ...Bun.env, COCKPIT_DATA_DIR: join(root, "data"), COCKPIT_GH_BIN: gh, COCKPIT_MOCK: "", COCKPIT_MOCK_DATA: "", COCKPIT_SENTRY_DSN: "" },
+      stdout: "pipe", stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+    ]);
+    if (code !== 0) throw new Error(stderr);
+    const outcome = JSON.parse(stdout);
+    expect(outcome.unavailable.status).toBe(503);
+    expect(outcome.unavailable.body.kind).toBe("transport");
+    expect(outcome.limited.status).toBe(403);
+    expect(outcome.limited.body.kind).toBe("quota");
+    expect(Number(outcome.limited.retryAfter)).toBeGreaterThan(0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 describe("hosted update policy", () => {
   test("hides updates and rejects update requests when updates are disabled", async () => {
     const previous = process.env.COCKPIT_UPDATE_DISABLED;
@@ -442,6 +494,9 @@ describe("agent PR summary", () => {
     updatedAt: "2026-07-22T10:00:00Z",
     headRefName: "reconcile-cooldown",
     headRefOid: "a".repeat(40),
+    reviews: { nodes: [] },
+    reviewRequests: { nodes: [] },
+    comments: { nodes: [] },
     lastCommit: {
       nodes: [{
         commit: {
@@ -1153,6 +1208,9 @@ describe("PR detail refresh", () => {
       headRefName: "feature",
       headRefOid: "a".repeat(40),
       baseRefName: "main",
+      reviews: { nodes: [] },
+      reviewRequests: { nodes: [] },
+      comments: { nodes: [] },
     };
     let releaseRefresh!: () => void;
     let markRefreshFinished!: () => void;
@@ -1197,6 +1255,28 @@ describe("PR detail refresh", () => {
       expect(refreshCalls).toBe(1);
     } finally {
       releaseRefresh();
+      db.query("DELETE FROM pr_detail_cache WHERE repo = ? AND number = ?").run(repo, number);
+    }
+  });
+
+  test("untracked cached details include scores explicitly posted by review apps", async () => {
+    const repo = "example/widgets";
+    const number = 987654325;
+    const detail = JSON.parse(trackedPrRow({ repo, number, fetchedAt: new Date().toISOString() }).detail_json);
+    detail.comments.nodes = [{
+      id: "review-app-comment", author: { login: "quality-app", __typename: "Bot" },
+      body: "Quality score: 8/10", createdAt: "2026-07-25T00:00:00Z",
+    }];
+    detail.commitList.nodes = [{ commit: { oid: detail.headRefOid, committedDate: "2026-07-24T00:00:00Z" } }];
+    upsertCachedPrDetail({
+      repo, number, head_sha: detail.headRefOid,
+      detail_json: JSON.stringify(detail), fetched_at: new Date().toISOString(),
+    });
+    try {
+      const response = await buildFetchHandler(4820)(new Request(`http://127.0.0.1:4820/api/pr/${repo}/${number}`));
+      expect(response.status).toBe(200);
+      expect((await response.json()).reviewerScores).toEqual({ "quality-app": { score: 4, stale: false } });
+    } finally {
       db.query("DELETE FROM pr_detail_cache WHERE repo = ? AND number = ?").run(repo, number);
     }
   });

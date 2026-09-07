@@ -16,7 +16,9 @@
   import Kbd from "./lib/Kbd.svelte";
   import { fetchSettings } from "./lib/api.js";
   import { showFlash } from "./lib/flash.svelte.js";
-  import { prefs } from "./lib/prefs.svelte.js";
+  import { prefs, setPrefs } from "./lib/prefs.svelte.js";
+  import { NOTIFICATION_DRAIN_EVENT, canDeliverNotifications, drainNotifications } from "./lib/desktopNotifications.js";
+  import { notificationDelivery } from "./lib/notificationDelivery.svelte.js";
   import { quota } from "./lib/quota.svelte.js";
   import { quotaImpact } from "./lib/quotaImpact.js";
   import { navigationForShortcut } from "./lib/navigationShortcuts.js";
@@ -124,6 +126,23 @@
       .catch(() => (reposConfigured = true));
   });
 
+  // Single delivery owner. Pending desktop notifications are claimed only while opted in with
+  // permission granted, re-checked live per claim and per show: when the opt-in loads or flips on,
+  // on every queue insert, after a (re)connect, and when Settings grants permission or retries.
+  function drainPending() {
+    drainNotifications({ eligible: () => canDeliverNotifications(prefs.notificationsEnabled) }).then(
+      () => (notificationDelivery.error = null),
+      (error) => (notificationDelivery.error = error instanceof Error ? error.message : String(error)),
+    );
+  }
+  $effect(() => {
+    if (prefs.notificationsEnabled) drainPending();
+  });
+  $effect(() => {
+    window.addEventListener(NOTIFICATION_DRAIN_EVENT, drainPending);
+    return () => window.removeEventListener(NOTIFICATION_DRAIN_EVENT, drainPending);
+  });
+
   $effect(() => {
     let socket = null;
     let reconnectTimer = null;
@@ -131,6 +150,7 @@
     function refreshRoute() {
       if (route.name === "inbox") inboxRevision++;
       else if (route.name === "detail") detailRevision++;
+      drainPending();
     }
 
     function connect() {
@@ -149,6 +169,10 @@
         }
         if (invalidation.type === "poll-complete") {
           pollCompletedAt = invalidation.lastPollAt;
+        } else if (invalidation.type === "notifications") {
+          drainPending();
+        } else if (invalidation.type === "notification-settings") {
+          fetchSettings().then(setPrefs).catch(() => {});
         } else if (invalidation.type === "inbox" && route.name === "inbox") {
           inboxRevision++;
         } else if (

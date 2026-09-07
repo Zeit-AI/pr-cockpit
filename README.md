@@ -49,6 +49,10 @@ Diffs, threads, checks, and file history live in the same review workspace. Pres
 
 When the review needs a change, stay in context: <kbd>e</kbd> edits the open file and commits the patch to the PR; <kbd>p</kbd> opens the PR in your configured coding agent with review context. You can also revert a focused hunk or press <kbd>h</kbd> to inspect file history.
 
+Reviewer badges show scores explicitly posted in reviews or comments, parsed without launching a scoring agent.
+
+Desktop notifications are off by default. In **Settings → Notifications**, choose events and combine rules for human or bot authors, comment text, repositories, and review requests. GitHub bot accounts and configured review bots count as bots; unknown authors match neither human nor bot filters.
+
 <details>
 <summary><strong>Everyday shortcuts</strong></summary>
 

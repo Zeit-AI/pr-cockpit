@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reportInstallFailure } from "./installFailure.ts";
+import { MAX_INSTALL_FAILURE_DETAIL_BYTES, reportInstallFailure } from "./installFailure.ts";
 
 const uid = process.getuid?.() ?? 0;
 
@@ -22,6 +22,8 @@ function fakeInstall(
   writeFileSync(curlCalls, "");
   const reportCalls = join(home, "sentry-report-calls");
   writeFileSync(reportCalls, "");
+  const reportDetails = join(home, "sentry-report-details");
+  writeFileSync(reportDetails, "");
   mkdirSync(join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "ui"), { recursive: true });
   mkdirSync(join(root, "shell"), { recursive: true });
@@ -39,8 +41,8 @@ function fakeInstall(
     ? "exit 1"
     : `printf 'gui/${uid}/app.pr-cockpit = {\\n\\tstate = running\\n\\targuments = {\\n\\t\\tCOCKPIT_ROOT=${resolved}\\n\\t}\\n}\\n'`;
   for (const [name, body] of [
-    ["bun", `if [[ "\${1:-}" == */scripts/installFailure.ts ]]; then printf '%s\\n' "$*" >> ${JSON.stringify(reportCalls)}; [[ "\${COCKPIT_TEST_HANG_SENTRY_REPORTER:-0}" != "1" ]] || sleep 60; exit 0; fi
-if [[ "\${COCKPIT_TEST_FAIL_BUN_INSTALL:-0}" == "1" && "\${1:-}" == "install" ]]; then exit 7; fi
+    ["bun", `if [[ "\${1:-}" == */scripts/installFailure.ts ]]; then printf '%s\\n' "$*" >> ${JSON.stringify(reportCalls)}; [[ -z "\${6:-}" || ! -f "$6" ]] || cat "$6" >> ${JSON.stringify(reportDetails)}; [[ "\${COCKPIT_TEST_HANG_SENTRY_REPORTER:-0}" != "1" ]] || sleep 60; exit 0; fi
+if [[ "\${COCKPIT_TEST_FAIL_BUN_INSTALL:-0}" == "1" && "\${1:-}" == "install" ]]; then printf 'dependency resolver failed for %s token=ghp_installsecret\\n' "$HOME" >&2; exit 7; fi
 exit 0`],
     ["uname", `printf '${platform}\\n'`],
     ["gh", "exit 0"],
@@ -64,7 +66,7 @@ exit 0`,
     writeFileSync(path, `#!/usr/bin/env bash\n${body}\n`);
     chmodSync(path, 0o755);
   }
-  return { root, calls, curlCalls, reportCalls, path: `${bin}:/usr/bin:/bin:/usr/sbin` };
+  return { root, calls, curlCalls, reportCalls, reportDetails, path: `${bin}:/usr/bin:/bin:/usr/sbin` };
 }
 
 async function install(
@@ -99,6 +101,7 @@ async function install(
     const calls = readFileSync(fake.calls, "utf8");
     const curlCalls = readFileSync(fake.curlCalls, "utf8");
     const reportCalls = readFileSync(fake.reportCalls, "utf8");
+    const reportDetails = readFileSync(fake.reportDetails, "utf8");
     const serverPlistPath = join(installHome, "Library/LaunchAgents/app.pr-cockpit.server.plist");
     const serverPlist = existsSync(serverPlistPath) ? readFileSync(serverPlistPath, "utf8") : "";
     const configPath = join(installHome, ".config/pr-cockpit/config");
@@ -110,6 +113,7 @@ async function install(
       calls,
       curlCalls,
       reportCalls,
+      reportDetails,
       root: fake.root,
       serverPlist,
       config,
@@ -136,11 +140,12 @@ test("new config is a commented inert example", async () => {
   expect(result.serverPlist).not.toContain("COCKPIT_TAILSCALE");
 });
 
-test("a failed macOS installation reports its stage without delaying exit", async () => {
+test("a failed macOS installation retains its failed substep and log without delaying or changing exit", async () => {
   const startedAt = performance.now();
   const result = await install(null, { failInstall: true, hangReporter: true });
   expect(result.exitCode).toBe(7);
-  expect(result.reportCalls).toContain("scripts/installFailure.ts Install dependencies 7 Darwin");
+  expect(result.reportCalls).toContain("scripts/installFailure.ts Install dependencies 7 Darwin root dependency install");
+  expect(result.reportDetails).toContain("dependency resolver failed");
   expect(performance.now() - startedAt).toBeLessThan(3_000);
 }, 10_000);
 
@@ -159,7 +164,13 @@ test("installer failure reporting sends one Sentry envelope unless disabled", as
     await reportInstallFailure({ stage: "Build UI", status: 7, platform: "Darwin" }, "");
     expect(envelope).toBe("");
     await reportInstallFailure(
-      { stage: "Build UI", status: 7, platform: "Darwin" },
+      {
+        stage: "Build UI",
+        status: 7,
+        platform: "Darwin",
+        substep: "UI build",
+        detail: `failed in ${process.env.HOME}/private token=ghp_installsecret NPM_TOKEN=enterprise-secret https://person:password@example.com/${"x".repeat(MAX_INSTALL_FAILURE_DETAIL_BYTES * 2)}`,
+      },
       `http://public@127.0.0.1:${server.port}/42`,
     );
     const [header, item, event] = envelope.split("\n").map((line) => JSON.parse(line));
@@ -172,13 +183,58 @@ test("installer failure reporting sends one Sentry envelope unless disabled", as
       install_stage: "Build UI",
       install_status: "7",
       install_platform: "Darwin",
+      install_substep: "UI build",
     });
+    expect(event.extra.error_detail).toContain("<home>/private");
+    expect(event.extra.error_detail).toContain("token=[redacted]");
+    expect(event.extra.error_detail).toContain("NPM_TOKEN=[redacted]");
+    expect(event.extra.error_detail).toContain("https://[redacted]@example.com/");
+    expect(event.extra.error_detail).not.toContain("ghp_installsecret");
+    expect(event.extra.error_detail).not.toContain("enterprise-secret");
+    expect(Buffer.byteLength(event.extra.error_detail)).toBeLessThanOrEqual(MAX_INSTALL_FAILURE_DETAIL_BYTES);
   } finally {
     server.stop(true);
   }
 });
 
-test("Linux lifecycle reports initialization failures without their raw error", async () => {
+test("reporter retains and redacts the end of an oversized single-line quiet log", async () => {
+  let envelope = "";
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      envelope = await request.text();
+      return new Response(null, { status: 200 });
+    },
+  });
+  const directory = mkdtempSync(join(tmpdir(), "cockpit-install-report-"));
+  const detailFile = join(directory, "failure.log");
+  writeFileSync(detailFile, `${"x".repeat(MAX_INSTALL_FAILURE_DETAIL_BYTES + 1_000)} token=ghp_oversizedsecret terminal compiler cause`);
+  try {
+    const proc = Bun.spawn([
+      process.execPath,
+      join(import.meta.dir, "installFailure.ts"),
+      "Build UI",
+      "9",
+      "Darwin",
+      "UI build",
+      detailFile,
+    ], {
+      env: { ...process.env, COCKPIT_SENTRY_DSN: `http://public@127.0.0.1:${server.port}/42` },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    expect(await proc.exited).toBe(0);
+    const event = JSON.parse(envelope.split("\n")[2]);
+    expect(event.extra.error_detail).toContain("terminal compiler cause");
+    expect(event.extra.error_detail).not.toContain("ghp_oversizedsecret");
+    expect(Buffer.byteLength(event.extra.error_detail)).toBeLessThanOrEqual(MAX_INSTALL_FAILURE_DETAIL_BYTES);
+  } finally {
+    server.stop(true);
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Linux lifecycle reports sanitized initialization failure detail", async () => {
   let envelope = "";
   const server = Bun.serve({
     port: 0,
@@ -206,6 +262,7 @@ test("Linux lifecycle reports initialization failures without their raw error", 
     expect(stderr).toMatch(/Linux lifecycle must not run as root|HOME must name a non-root absolute user home/);
     expect(event.message).toBe("Installation failed during install (exit 1)");
     expect(event.message).not.toContain("HOME");
+    expect(event.extra.error_detail).toMatch(/Linux lifecycle must not run as root|HOME must name a non-root absolute user home/);
   } finally {
     server.stop(true);
   }

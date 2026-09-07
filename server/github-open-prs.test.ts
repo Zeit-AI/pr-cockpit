@@ -77,7 +77,7 @@ test("repository open PR listing completes more than 100 results and rejects inc
     { mode: "missing", githubError: true, status: 404 },
     { mode: "cursor", githubError: true, status: 502 },
     { mode: "repeat", githubError: true, status: 502 },
-    { mode: "failure", githubError: true, status: 502 },
+    { mode: "failure", githubError: true, status: 403 },
   ]);
 });
 

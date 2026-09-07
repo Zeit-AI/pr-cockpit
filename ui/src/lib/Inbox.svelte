@@ -5,7 +5,7 @@
 
 <script>
   import { untrack } from "svelte";
-  import { fetchInbox, fetchRecentClosed, fetchAllPrs, fetchPrDetails, setArchived, saveSettings, reorderPr, fetchSettings, fetchRelayStatus, fetchRelayCoverage, autofixAgent, customAgent, rescoreAgent } from "./api.js";
+  import { fetchInbox, fetchRecentClosed, fetchAllPrs, fetchPrDetails, setArchived, saveSettings, reorderPr, fetchSettings, fetchRelayStatus, fetchRelayCoverage, autofixAgent, customAgent } from "./api.js";
   import { cacheDetail, cachedHeadSha } from "./detailCache.js";
   import { filterPrs, countMatches, wantsHistory } from "./prFilter.js";
   import { relativeTime } from "./time.js";
@@ -641,7 +641,6 @@
       for (const a of keybindAgents) {
         if (a.id === "fixer") continue;
         if (a.id === "autofix") keys.push({ key: a.keybind, label: multiRange ? "autofix selected" : "autofix" });
-        else if (a.id === "rescorer") keys.push({ key: a.keybind, label: "re-score" });
         else if (pr.fixerAgentState !== "running") keys.push({ key: a.keybind, label: a.name || "custom agent" });
       }
     }
@@ -705,8 +704,8 @@
 
   function requestCustomAgent(def) {
     confirmAction = {
-      title: def.id === "rescorer" ? "Re-score this PR?" : `Arm the "${def.name || "custom"}" agent on this PR?`,
-      confirmLabel: def.id === "rescorer" ? "Re-score" : "Arm agent",
+      title: `Arm the "${def.name || "custom"}" agent on this PR?`,
+      confirmLabel: "Arm agent",
       run: () => submitCustom(def),
     };
   }
@@ -715,13 +714,8 @@
     const pr = ordered[selected];
     if (!pr) return;
     try {
-      if (def.id === "rescorer") {
-        await rescoreAgent(pr.repo, pr.number);
-        bulkAutofixFlash.show("re-score started");
-      } else {
-        await customAgent(pr.repo, pr.number, def.id);
-        bulkAutofixFlash.show(`${def.name || "custom agent"} armed`);
-      }
+      await customAgent(pr.repo, pr.number, def.id);
+      bulkAutofixFlash.show(`${def.name || "custom agent"} armed`);
     } catch (e) {
       bulkAutofixFlash.show(e instanceof Error ? e.message : String(e));
     }
@@ -824,9 +818,7 @@
       } else if (view === "open" && keybindAgents.some((a) => a.id !== "fixer" && a.keybind === e.key)) {
         const def = keybindAgents.find((a) => a.id !== "fixer" && a.keybind === e.key);
         if (def.id === "autofix") openAutofixConfirm();
-        else if (def.id === "rescorer") {
-          if (pr) requestCustomAgent(def);
-        } else if (pr && pr.fixerAgentState !== "running") requestCustomAgent(def);
+        else if (pr && pr.fixerAgentState !== "running") requestCustomAgent(def);
       } else if (view === "open" && e.key === "e") {
         if (pr && isArchived(pr)) {
           archive(pr, false);
@@ -863,10 +855,6 @@
     return "Greptile confidence";
   }
 
-  function greptileChipTitle(pr) {
-    if (pr.greptileRescore) return `original ${pr.greptileConfidence}/5 by greptile-apps → ${pr.greptileRescore.score}/5 re-scored after fixes`;
-    return greptileTitle(pr.greptileStatus);
-  }
 </script>
 
 <div class="page">
@@ -1000,13 +988,12 @@
           </div>
         </div>
         {#if pr.reviewScore != null}
-          {@const fromGreptile = pr.reviewScore === (pr.greptileRescore ? pr.greptileRescore.score : pr.greptileConfidence)}
+          {@const fromGreptile = pr.reviewScore === pr.greptileConfidence}
           <span
             class="greptile"
-            class:stale={(fromGreptile && !pr.greptileRescore && pr.greptileStatus === "stale") || (!fromGreptile && pr.reviewScoreStale)}
-            class:addressed={fromGreptile && !pr.greptileRescore && pr.greptileStatus === "addressed"}
-            class:rescored={fromGreptile && !!pr.greptileRescore}
-            title={fromGreptile ? greptileChipTitle(pr) : pr.reviewScoreStale ? "lowest reviewer score — reviewed before recent pushes, may be out of date" : "lowest reviewer score"}
+            class:stale={(fromGreptile && pr.greptileStatus === "stale") || (!fromGreptile && pr.reviewScoreStale)}
+            class:addressed={fromGreptile && pr.greptileStatus === "addressed"}
+            title={fromGreptile ? greptileTitle(pr.greptileStatus) : pr.reviewScoreStale ? "lowest reviewer score — reviewed before recent pushes, may be out of date" : "lowest reviewer score"}
           >
             {pr.reviewScore}/5
           </span>
@@ -1683,11 +1670,6 @@
     color: var(--ready);
     border-color: var(--ready);
     opacity: 0.85;
-  }
-  .greptile.rescored {
-    color: var(--ready);
-    border-color: var(--ready);
-    font-weight: 600;
   }
   .row-age {
     flex: none;

@@ -30,7 +30,7 @@ const deps: PollDeps = {
     return searchHits;
   },
   searchRecentPrs: async () => [],
-  searchClosedPrs: async () => [],
+  searchClosedPrs: async () => ({ items: [], failures: [] }),
   getPr: () => null,
   refreshPr,
   lookupPr: async (repo, number) => {

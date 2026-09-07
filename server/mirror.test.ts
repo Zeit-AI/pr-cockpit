@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -300,4 +300,91 @@ describe("materializePrWorktree", () => {
     expect(result.stderr.toString()).toBe("");
     expect(result.exitCode).toBe(0);
   });
+});
+
+test("mirror fetches and checkouts distinguish credentials, connectivity, and deadlines", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-mirror-failures-"));
+  cleanup.push(dataDir);
+  const binDir = join(dataDir, "bin");
+  const gitPath = join(binDir, "git");
+  mkdirSync(binDir);
+  writeFileSync(gitPath, `#!/bin/sh
+if [ "$1" = "--git-dir" ] && [ "$3" = "cat-file" ]; then exit 1; fi
+case "$FAKE_GIT_FAILURE" in
+  credentials)
+    echo "remote: Invalid username or token. Password authentication is not supported for Git operations." >&2
+    echo "fatal: Authentication failed for 'https://github.com/acme/private.git/'" >&2
+    exit 128
+    ;;
+  network)
+    echo "fatal: unable to access 'https://github.com/acme/network.git/': Failed to connect to github.com port 443: Network is unreachable" >&2
+    exit 128
+    ;;
+  deadline)
+    sleep 0.1
+    ;;
+esac
+`);
+  chmodSync(gitPath, 0o700);
+  const moduleUrl = pathToFileURL(join(import.meta.dir, "mirror.ts")).href;
+  const scenario = `
+    // Load only after the subprocess has bound its isolated data directory and fake git.
+    const { fetchMirror, materializePrWorktree, MirrorFetchError } = await import(${JSON.stringify(moduleUrl)});
+    const failures = [];
+    for (const [repo, failure, timeout] of [
+      ["acme/private", "credentials", 1_000],
+      ["acme/network", "network", 1_000],
+      ["acme/deadline", "deadline", 20],
+    ]) {
+      process.env.FAKE_GIT_FAILURE = failure;
+      try {
+        await fetchMirror(repo, timeout);
+      } catch (error) {
+        if (!(error instanceof MirrorFetchError)) throw error;
+        failures.push({ kind: error.kind, message: error.message });
+      }
+    }
+    process.env.FAKE_GIT_FAILURE = "deadline";
+    const unbounded = fetchMirror("acme/dedup");
+    try {
+      await fetchMirror("acme/dedup", 20);
+    } catch (error) {
+      if (!(error instanceof MirrorFetchError)) throw error;
+      failures.push({ kind: error.kind, message: error.message });
+    }
+    const nativeSetTimeout = globalThis.setTimeout;
+    globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(callback, delay === 15_000 ? 20 : delay, ...args);
+    process.env.FAKE_GIT_FAILURE = "deadline";
+    try {
+      await materializePrWorktree("acme/checkout", 7, "a".repeat(40));
+    } catch (error) {
+      if (!(error instanceof MirrorFetchError)) throw error;
+      failures.push({ kind: error.kind, message: error.message });
+    } finally {
+      globalThis.setTimeout = nativeSetTimeout;
+    }
+    await unbounded;
+    process.stdout.write(JSON.stringify(failures));
+  `;
+  const process = Bun.spawn([Bun.which("bun") ?? "bun", "-e", scenario], {
+    env: {
+      ...Bun.env,
+      COCKPIT_DATA_DIR: dataDir,
+      COCKPIT_MOCK: "1",
+      PATH: `${binDir}:${Bun.env.PATH ?? ""}`,
+    },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [exitCode, stdout, stderr] = await Promise.all([
+    process.exited,
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+  ]);
+  if (exitCode !== 0) throw new Error(stderr);
+  const failures = JSON.parse(stdout);
+  expect(failures.map((failure: { kind: string }) => failure.kind)).toEqual([
+    "credentials", "network", "deadline", "deadline", "deadline",
+  ]);
+  expect(failures[1].message).toContain("Network is unreachable");
 });

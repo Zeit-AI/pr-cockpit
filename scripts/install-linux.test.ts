@@ -89,7 +89,7 @@ function fixture() {
   writeFileSync(mimeState, "foreign.desktop\n");
   mkdirSync(join(dataHome, "applications"), { recursive: true });
   writeFileSync(join(dataHome, "applications/foreign.desktop"), "[Desktop Entry]\n");
-  executable(join(bin, "bun"), `if [[ "\${1:-}" == */scripts/linux-lifecycle.ts && "\${2:-}" == "activate" ]]; then printf '%s\n' "$1" >> ${JSON.stringify(actorLog)}; actor="$1"; shift; exec ${JSON.stringify(process.execPath)} ${JSON.stringify(TEST_LIFECYCLE)} "$actor" "$@"; elif [[ "\${1:-}" == "install" && "$PWD" == */shell ]]; then mkdir -p node_modules/electron; printf 'installer' > node_modules/electron/install.js; elif [[ "\${1:-}" == "node_modules/electron/install.js" ]]; then [[ -f "$1" ]] || exit 1; mkdir -p node_modules/electron/dist; printf '#!/usr/bin/env bash\\nexit 0\\n' > node_modules/electron/dist/electron; chmod 0755 node_modules/electron/dist/electron; printf '%s\\n' "$PWD/$1" >> ${JSON.stringify(electronInstallLog)}; elif [[ "\${1:-}" == "run" && "\${2:-}" == "build" && "$PWD" == */ui ]]; then mkdir -p ../static; printf '<html>built</html>\\n' > ../static/index.html; fi\nexit 0`);
+  executable(join(bin, "bun"), `if [[ "\${1:-}" == */scripts/linux-lifecycle.ts && "\${2:-}" == "activate" ]]; then printf '%s\n' "$1" >> ${JSON.stringify(actorLog)}; [[ "\${COCKPIT_TEST_KILL_ACTIVATION:-0}" != "1" ]] || kill -KILL "$$"; actor="$1"; shift; exec ${JSON.stringify(process.execPath)} ${JSON.stringify(TEST_LIFECYCLE)} "$actor" "$@"; elif [[ "\${1:-}" == "install" && "$PWD" == */shell ]]; then mkdir -p node_modules/electron; printf 'installer' > node_modules/electron/install.js; elif [[ "\${1:-}" == "node_modules/electron/install.js" ]]; then [[ -f "$1" ]] || exit 1; mkdir -p node_modules/electron/dist; printf '#!/usr/bin/env bash\\nexit 0\\n' > node_modules/electron/dist/electron; chmod 0755 node_modules/electron/dist/electron; printf '%s\\n' "$PWD/$1" >> ${JSON.stringify(electronInstallLog)}; elif [[ "\${1:-}" == "run" && "\${2:-}" == "build" && "$PWD" == */ui ]]; then mkdir -p ../static; printf '<html>built</html>\\n' > ../static/index.html; fi\nexit 0`);
   executable(join(bin, "gh"), "exit 1");
   executable(join(bin, "git"), `
 if [[ "$*" == *"rev-parse HEAD"* ]]; then
@@ -152,6 +152,7 @@ fi`);
     XDG_STATE_HOME: stateHome,
     XDG_RUNTIME_DIR: runtimeHome,
     PATH: `${bin}:/usr/bin:/bin`,
+    COCKPIT_SENTRY_DSN: "",
   };
   async function lifecycle(args: string[], extra: Record<string, string> = {}, actor = LIFECYCLE) {
     const proc = Bun.spawn([process.execPath, TEST_LIFECYCLE, actor, ...args], { env: { ...env, ...extra }, stdout: "pipe", stderr: "pipe" });
@@ -320,6 +321,52 @@ describe("transactional Linux lifecycle", () => {
     expect(failed.stderr).toContain("activation failed and prior release rollback could not be proved");
     expect(failed.stderr).toContain("injected failure at health");
     expect(failed.stderr).toContain("forced rollback stop failure");
+  });
+
+  test("installation failure reporting retains the immutable activation cause", async () => {
+    const f = fixture();
+    let envelope = "";
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        envelope = await request.text();
+        return new Response(null, { status: 200 });
+      },
+    });
+    try {
+      const failed = await f.lifecycle(["install", f.source], {
+        COCKPIT_LINUX_FAIL_AT: "health",
+        COCKPIT_SENTRY_DSN: `http://public@127.0.0.1:${server.port}/42`,
+      });
+      expect(failed.exitCode).toBe(1);
+      const event = JSON.parse(envelope.split("\n")[2]);
+      expect(event.extra.error_detail).toContain("injected failure at health");
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("parent reports activation terminated before child diagnostics", async () => {
+    const f = fixture();
+    let envelope = "";
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        envelope = await request.text();
+        return new Response(null, { status: 200 });
+      },
+    });
+    try {
+      const failed = await f.lifecycle(["install", f.source], {
+        COCKPIT_TEST_KILL_ACTIVATION: "1",
+        COCKPIT_SENTRY_DSN: `http://public@127.0.0.1:${server.port}/42`,
+      });
+      expect(failed.exitCode).toBe(1);
+      const event = JSON.parse(envelope.split("\n")[2]);
+      expect(event.extra.error_detail).toMatch(/\b(?:SIGKILL|137)\b/);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("refreshes the desktop database in activation, rollback, and uninstall order", async () => {

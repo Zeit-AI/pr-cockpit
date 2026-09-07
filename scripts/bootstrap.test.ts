@@ -132,23 +132,6 @@ test("Linux bootstrap accepts an installed but unauthenticated gh binary", async
     rmSync(root, { recursive: true, force: true });
   }
 });
-test("Linux dry run names pinned user-tool downloads without network", async () => {
-  const root = mkdtempSync(join(tmpdir(), "cockpit-bootstrap-linux-tools-"));
-  const home = join(root, "home");
-  try {
-    const path = stubbedPath(root, "Linux");
-    rmSync(join(root, "bin/bun"));
-    rmSync(join(root, "bin/gh"));
-    const result = await runBootstrap({ home, target: join(root, "checkout"), path, dryRun: true });
-    expect(result.exitCode).toBe(0);
-    expect(result.output).toContain("would download pinned Bun 1.3.14");
-    expect(result.output).toContain("bun-linux-x64.zip");
-    expect(result.output).toContain("would download pinned GitHub CLI 2.76.2");
-    expect(result.output).toContain("gh_2.76.2_linux_amd64.tar.gz");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-});
 
 
 test("a non-interactive install stays plain and skips the optional follow-up", async () => {

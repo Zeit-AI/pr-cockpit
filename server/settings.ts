@@ -1,5 +1,7 @@
 import { getSetting, setSetting } from "./db.ts";
 import { detectHarness, normalizeHarness, type Harness } from "./harness.ts";
+import { notificationSettingsChanged, storedNotificationSettings } from "./notifications.ts";
+import { defaultNotificationSettings, parseNotificationSettings, type NotificationSettings } from "../shared/notificationRules.ts";
 import desktopShortcuts from "../shared/desktopShortcuts.json";
 
 const POLL_INTERVAL_FLOOR_S = 60;
@@ -30,7 +32,6 @@ export interface AgentSetting {
 export const AGENT_DEFAULTS: AgentSetting[] = [
   { id: "fixer", name: "Auto-merge fixer", enabled: true, trigger: "keybind", keybind: "a", model: "opus", prompt_template: "" },
   { id: "autofix", name: "Auto-fix", enabled: true, trigger: "keybind", keybind: "f", model: "opus", prompt_template: "" },
-  { id: "rescorer", name: "Greptile re-scorer", enabled: true, trigger: "activity", keybind: null, model: "sonnet", prompt_template: "" },
 ];
 
 export const CUSTOM_AGENT_ID_PREFIX = "custom-";
@@ -145,14 +146,22 @@ export function seedSettings(): void {
   if (getSetting("diff_layout") === null) setSetting("diff_layout", "split");
   if (getSetting("force_merge_repos") === null) setSetting("force_merge_repos", "");
   if (getSetting("review_bots") === null) setSetting("review_bots", envReviewBots);
-  // migrates the pre-list per-agent keys (fixer_enabled, autofix_prompt_template, …) into the agents list
-  if (getSetting("agents") === null) {
+  // migrate legacy per-agent keys and remove the retired rescorer without rewriting the remaining entries
+  const storedAgents = getSetting("agents");
+  if (storedAgents === null) {
     const migrated = AGENT_DEFAULTS.map((def) => ({
       ...def,
       enabled: getSetting(`${def.id}_enabled`) !== "false",
       prompt_template: getSetting(`${def.id}_prompt_template`) ?? "",
     }));
     setSetting("agents", JSON.stringify(migrated));
+  } else {
+    try {
+      const parsed: unknown = JSON.parse(storedAgents);
+      if (Array.isArray(parsed) && parsed.some((agent) => agent && typeof agent === "object" && "id" in agent && agent.id === "rescorer")) {
+        setSetting("agents", JSON.stringify(parsed.filter((agent) => !agent || typeof agent !== "object" || !("id" in agent) || agent.id !== "rescorer")));
+      }
+    } catch {}
   }
   if (getSetting("keybind_platform_defaults_migrated") !== "true") {
     const openApp = getSetting("keybind_open_app");
@@ -166,6 +175,11 @@ export function seedSettings(): void {
   if (getSetting("saved_views") === null) setSetting("saved_views", "[]");
   if (getSetting("repo_roots") === null) setSetting("repo_roots", envRepoRoots);
   if (getSetting("cockpit_webhooks") === null) setSetting("cockpit_webhooks", "false");
+  if (getSetting("notifications") === null) {
+    setSetting("notifications", JSON.stringify(defaultNotificationSettings()));
+  } else if (notificationSettings().enabled && getSetting("notifications_enabled_at") === null) {
+    setSetting("notifications_enabled_at", new Date().toISOString());
+  }
   // first launch prefers omp when it is installed - see harness.ts
   if (getSetting("agent_harness") === null) setSetting("agent_harness", detectHarness());
 }
@@ -201,6 +215,10 @@ export function pollIntervalMs(): number {
   return clampInterval(Number(getSetting("poll_interval_s"))) * 1000;
 }
 
+export function notificationSettings(): NotificationSettings {
+  return storedNotificationSettings();
+}
+
 export interface Settings {
   desktop_platform: string;
   repos: string;
@@ -232,6 +250,7 @@ export interface Settings {
   cockpit_webhooks: boolean;
   agent_harness: Harness;
   relay_url: string;
+  notifications: NotificationSettings;
 }
 
 export function readSettings(): Settings {
@@ -269,6 +288,7 @@ export function readSettings(): Settings {
     cockpit_webhooks: getSetting("cockpit_webhooks") === "true",
     agent_harness: normalizeHarness(getSetting("agent_harness")),
     relay_url: relayConfig().url,
+    notifications: notificationSettings(),
   };
 }
 
@@ -303,8 +323,12 @@ export function writeSettings(
     cockpit_webhooks: boolean;
     agent_harness: string;
     relay_url: string;
+    notifications: NotificationSettings;
   }>,
 ): Settings {
+  const notifications = patch.notifications === undefined
+    ? undefined
+    : parseNotificationSettings(patch.notifications);
   const replicaSshHost = patch.replica_ssh_host === undefined
     ? undefined
     : normalizeReplicaSshHost(patch.replica_ssh_host);
@@ -340,5 +364,14 @@ export function writeSettings(
   if (patch.cockpit_webhooks !== undefined) setSetting("cockpit_webhooks", patch.cockpit_webhooks ? "true" : "false");
   if (patch.agent_harness !== undefined) setSetting("agent_harness", normalizeHarness(patch.agent_harness));
   if (patch.relay_url !== undefined) setSetting("relay_url", patch.relay_url.trim());
+  if (notifications !== undefined) {
+    const previous = notificationSettings();
+    const changed = JSON.stringify(previous) !== JSON.stringify(notifications);
+    if (changed) {
+      setSetting("notifications", JSON.stringify(notifications));
+      if (!previous.enabled && notifications.enabled) setSetting("notifications_enabled_at", new Date().toISOString());
+      notificationSettingsChanged();
+    }
+  }
   return readSettings();
 }
