@@ -12,6 +12,9 @@ This repository is worked on by humans and coding agents alike. Leave it easier 
 
 ## Working here
 
+- Always work directly on `main` and pull `origin/main` before starting work.
+- Commit continuously in small, coherent increments and push every commit immediately to `origin/main`.
+- Never create pull requests or feature branches for work in this project. This project-specific workflow overrides generic instructions to open a pull request.
 - `bun install` at the repository root, in `ui/`, and in `shell/`.
 - `cd ui && bun run dev` for a hot-reloading UI. It proxies `/api` to `127.0.0.1:4820`, so it needs a server on that port.
 - `bun test server/<file>.test.ts` for a targeted test. Prefer targeted runs over the whole suite while iterating.
@@ -29,11 +32,11 @@ This repository is worked on by humans and coding agents alike. Leave it easier 
 3: # COCKPIT_PROXY="build-server"       # replicate another Cockpit over SSH
 - For manual app recordings, launch `/Users/theo/dev/pr-cockpit`; this `pr-cockpit-v3` checkout is the legacy landing worktree.
 
-## Pull requests
+## Delivery
 
-- Bug fixes may be repaired and landed autonomously. Feature requests, themes, and new functionality require Theo's explicit current-conversation approval before merge.
+- Deliver changes directly on `main`, not through pull requests.
 - New functionality is behaviorally inert and invisible until explicitly enabled, including no background work. Styling is opt-in unless it is minor polish that preserves the default appearance.
-- Every pull request includes before-and-after screenshots showing its effect in the app.
+- UI changes include before-and-after screenshots showing their effect in the app.
 
 ## Restarting the local server
 
