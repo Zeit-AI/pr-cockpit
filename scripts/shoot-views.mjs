@@ -870,6 +870,39 @@ const scenarios = [
     },
   },
   settings("settings", "Workspace repository configuration.", "general"),
+  {
+    ...settings("settings-developer-updates", "Explicit GitHub update checks and installation from the Developer menu.", "general"),
+    beforeGoto: async (page) => {
+      let checks = 0;
+      await page.route("**/api/version", (route) => {
+        if (route.request().method() === "POST") checks++;
+        return route.fulfill({
+          status: checks === 2 ? 502 : 200,
+          contentType: "application/json",
+          body: JSON.stringify(checks === 2 ? { error: "Could not fetch origin/main from GitHub." } : { updateAvailable: checks > 2, rev: "fixture" }),
+        });
+      });
+      await page.route("**/api/update", (route) => route.fulfill({ status: 200, contentType: "application/json", body: '{"ok":true}' }));
+    },
+    interact: async (page) => {
+      await page.getByText("Developer", { exact: true }).click();
+      const check = page.getByRole("button", { name: /Check for updates$/ });
+      await check.click();
+      await page.getByRole("status").getByText("Already up to date.", { exact: true }).waitFor();
+      await check.click();
+      await page.getByRole("status").getByText("Update check failed:", { exact: false }).waitFor();
+      if (await page.getByRole("button", { name: "Install update", exact: true }).count()) throw new Error("Failed check offered installation");
+      await check.click();
+      await page.getByRole("status").getByText("Update available.", { exact: true }).waitFor();
+      const request = page.waitForRequest((request) => request.url().endsWith("/api/update") && request.method() === "POST");
+      await page.getByRole("button", { name: "Install update", exact: true }).click();
+      await request;
+    },
+    verify: async (page) => {
+      await page.getByRole("button", { name: "Updating", exact: true }).waitFor();
+      if (!await page.getByRole("button", { name: /Check for updates$/ }).isDisabled()) throw new Error("Check remained enabled during installation");
+    },
+  },
   settings("settings-appearance", "Opt-in appearance, typography, and window preferences.", "appearance"),
   settings("settings-connections", "Remote Cockpit connection settings.", "advanced"),
   {

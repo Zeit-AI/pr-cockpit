@@ -1,7 +1,27 @@
 <script>
-  import { fetchVersion, triggerUpdate } from "./api.js";
+  import { checkForUpdates, fetchVersion, triggerUpdate } from "./api.js";
   import { showFlash } from "./flash.svelte.js";
 
+  let { manual = false } = $props();
+  let checking = $state(false);
+  let checkMessage = $state("");
+
+  async function check() {
+    if (checking || updating) return;
+    checking = true;
+    checkMessage = "";
+    available = false;
+    try {
+      const result = await checkForUpdates();
+      if (result.rev && loadedRev === null) loadedRev = result.rev;
+      available = result.updateAvailable;
+      checkMessage = available ? "Update available." : "Already up to date.";
+    } catch (err) {
+      checkMessage = `Update check failed: ${err.message}`;
+    } finally {
+      checking = false;
+    }
+  }
   let available = $state(false);
   let updating = $state(false);
   // The build this page was served by. An update that restarts the server without replacing this window
@@ -19,12 +39,14 @@
   }
 
   $effect(() => {
+    if (manual && !updating) return;
     poll();
-    const timer = setInterval(poll, 5 * 60 * 1000);
+    const timer = setInterval(poll, manual ? 1000 : 5 * 60 * 1000);
     return () => clearInterval(timer);
   });
 
   $effect(() => {
+    if (manual) return;
     function onVisible() {
       if (document.visibilityState === "visible") poll();
     }
@@ -45,6 +67,12 @@
   }
 </script>
 
+{#if manual}
+  <button class="update" type="button" disabled={checking || updating} onclick={check}>
+    {checking ? "Checking…" : "Check for updates"}
+  </button>
+  <span role="status">{checkMessage}</span>
+{/if}
 {#if available}
   <button class="update" class:updating disabled={updating} aria-label={updating ? "Updating" : "Install update"} onclick={update}>
     {updating ? "Updating…" : "Install update"}

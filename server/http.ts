@@ -114,7 +114,7 @@ import {
   listFixerAgents,
   type AgentRow,
 } from "./agents.ts";
-import { isUpdateAvailable, runningRev, updatesEnabled } from "./version.ts";
+import { checkForUpdate, isUpdateAvailable, runningRev, updatesEnabled } from "./version.ts";
 import { spawn } from "node:child_process";
 import { repoUsersCached } from "./repoUsers.ts";
 import { matchesQuery, parseQuery, wantsHistoricalPrs } from "./query.ts";
@@ -2984,6 +2984,15 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
     }
     if (req.method === "GET" && url.pathname === "/api/version") {
       return json({ updateAvailable: isUpdateAvailable(), rev: runningRev() });
+    }
+    if (req.method === "POST" && url.pathname === "/api/version") {
+      if (!updatesEnabled()) return json({ error: "updates are disabled for this installation" }, 403);
+      try {
+        await checkForUpdate();
+        return json({ updateAvailable: isUpdateAvailable(), rev: runningRev() });
+      } catch (err) {
+        return json({ error: err instanceof Error ? err.message : String(err) }, 502);
+      }
     }
     if (req.method === "POST" && url.pathname === "/api/update") {
       return handleUpdate();

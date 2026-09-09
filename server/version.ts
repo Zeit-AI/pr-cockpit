@@ -11,27 +11,27 @@ export function updatesEnabled(): boolean {
   return process.env.COCKPIT_UPDATE_DISABLED !== "1";
 }
 
-async function checkForUpdate(): Promise<void> {
-  try {
-    const fetchProc = Bun.spawn(["git", "fetch", "--quiet", "origin", "main"], {
-      cwd: sourceRoot,
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-    await fetchProc.exited;
+export async function checkForUpdate(): Promise<void> {
+  if (!updatesEnabled()) throw new Error("updates are disabled for this installation");
+  const fetchProc = Bun.spawn(["git", "fetch", "--quiet", "origin", "main"], {
+    cwd: sourceRoot,
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  if (await fetchProc.exited !== 0) throw new Error("Could not fetch origin/main from GitHub.");
 
-    const revListProc = Bun.spawn(["git", "rev-list", `${bootRev}..origin/main`, "--count"], {
-      cwd: sourceRoot,
-      stdout: "pipe",
-      stderr: "ignore",
-    });
-    const count = (await new Response(revListProc.stdout).text()).trim();
-    await revListProc.exited;
+  const revListProc = Bun.spawn(["git", "rev-list", `${bootRev}..origin/main`, "--count"], {
+    cwd: sourceRoot,
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const count = (await new Response(revListProc.stdout).text()).trim();
+  if (await revListProc.exited !== 0) throw new Error("Could not compare the running revision with origin/main.");
+  updateAvailable = Number(count) > 0;
+}
 
-    updateAvailable = Number(count) > 0;
-  } catch (err) {
-    console.error("update check failed:", err);
-  }
+function pollForUpdate(): void {
+  checkForUpdate().catch((err) => console.error("update check failed:", err));
 }
 
 export function isUpdateAvailable(): boolean {
@@ -44,6 +44,6 @@ export function runningRev(): string {
 
 export function startUpdateCheck(): void {
   if (!updatesEnabled()) return;
-  checkForUpdate();
-  setInterval(checkForUpdate, CHECK_INTERVAL_MS);
+  pollForUpdate();
+  setInterval(pollForUpdate, CHECK_INTERVAL_MS);
 }

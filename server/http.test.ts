@@ -451,11 +451,14 @@ describe("hosted update policy", () => {
       const fetchHandler = buildFetchHandler(4820);
       const versionResponse = await fetchHandler(new Request("http://127.0.0.1:4820/api/version"));
       const updateResponse = await fetchHandler(new Request("http://127.0.0.1:4820/api/update", { method: "POST" }));
+      const checkResponse = await fetchHandler(new Request("http://127.0.0.1:4820/api/version", { method: "POST" }));
 
       expect(versionResponse.status).toBe(200);
       expect(await versionResponse.json()).toMatchObject({ updateAvailable: false });
       expect(updateResponse.status).toBe(403);
       expect(await updateResponse.json()).toEqual({ error: "updates are disabled for this installation" });
+      expect(checkResponse.status).toBe(403);
+      expect(await checkResponse.json()).toEqual({ error: "updates are disabled for this installation" });
     } finally {
       if (previous === undefined) delete process.env.COCKPIT_UPDATE_DISABLED;
       else process.env.COCKPIT_UPDATE_DISABLED = previous;

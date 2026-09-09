@@ -109,6 +109,8 @@ Local caching does **not** mean the app makes no external connections. Besides G
 <details>
 <summary><strong>Updates, diagnostics, and configuration</strong></summary>
 
+In **Settings → Workspace → Developer**, choose **Check for updates** to fetch the latest `main` revision from GitHub. If an update is available, **Install update** runs the existing updater; the page reloads when the server reports the new revision. Installations with updates disabled reject both actions.
+
 ```sh
 pr-cockpit update  # update and reconcile the installed app
 pr-cockpit status  # identify the process supervising the local server

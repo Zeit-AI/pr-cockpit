@@ -386,6 +386,13 @@ export async function fetchVersion() {
   return res.json();
 }
 
+export async function checkForUpdates() {
+  const res = await fetch("/api/version", { method: "POST" });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body?.error || `update check ${res.status}`);
+  return body;
+}
+
 export async function triggerUpdate() {
   const res = await fetch("/api/update", { method: "POST" });
   const body = await res.json().catch(() => null);

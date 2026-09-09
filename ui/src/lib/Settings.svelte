@@ -10,6 +10,7 @@
   import Kbd from "./Kbd.svelte";
   import SettingsAnalytics from "./SettingsAnalytics.svelte";
   import SettingsNotifications from "./SettingsNotifications.svelte";
+  import UpdateButton from "./UpdateButton.svelte";
   import { notificationRuleIssues, serializeNotificationSettings } from "./notificationEditor.js";
   import { defaultNotificationSettings } from "../../../shared/notificationRules.ts";
   import { SETTINGS_SECTION_KEY, SETTINGS_SECTIONS, normalizeSettingsSection, settingsSectionHref } from "./settingsSections.js";
@@ -415,6 +416,12 @@
             {/if}
           </div>
         </div>
+        </details>
+        <details class="disclosure">
+          <summary>Developer</summary>
+          <div class="disclosure-body">
+            <UpdateButton manual />
+          </div>
         </details>
       {/if}
 
