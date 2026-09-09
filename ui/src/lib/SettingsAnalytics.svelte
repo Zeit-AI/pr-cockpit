@@ -324,6 +324,34 @@
   let heatMaximum = $derived(Math.max(1, ...(view?.series.flatMap((series) => series.values) ?? [])));
   let dailyChart = $derived(buildChart(view, false));
   let cumulativeChart = $derived(buildChart(view, true));
+  let weeklyChart = $derived.by(() => {
+    if (!view || !payload) return buildChart(null, false);
+    const dayMs = 86_400_000;
+    const today = Date.parse(`${isoDay(new Date(view.asOfMs))}T00:00:00Z`);
+    const historyStart = today - 179 * dayMs;
+    const firstDay = Math.max(Math.floor(view.startMs / dayMs) * dayMs, historyStart + 6 * dayMs);
+    const hidden = new Set(hiddenScopes);
+    const daily = new Map();
+    for (const pr of payload.pullRequests) {
+      if (hidden.has(scopeOf(pr))) continue;
+      const day = Math.floor(Date.parse(pr.mergedAt) / dayMs) * dayMs;
+      daily.set(day, (daily.get(day) ?? 0) + 1);
+    }
+    const buckets = [];
+    const values = [];
+    let total = 0;
+    for (let day = firstDay - 6 * dayMs; day < today; day += dayMs) {
+      total += daily.get(day) ?? 0;
+      if (day > firstDay) total -= daily.get(day - 7 * dayMs) ?? 0;
+      if (day < firstDay) continue;
+      buckets.push({ label: formatBucket(new Date(day), 24) });
+      values.push(total);
+    }
+    return buildChart({
+      buckets,
+      series: [{ author: "All authors · PRs merged in the preceding 7 days", color: "var(--ready)", total: values.at(-1) ?? 0, values }],
+    }, false);
+  });
   let timeSummary = $derived.by(() => {
     if (!view) return "";
     const start = new Date(view.startMs);
@@ -481,6 +509,22 @@
               {/each}
             </div>
           </div>
+        </section>
+
+        <section class="panel chart-panel" aria-labelledby="weekly-chart-title">
+          <div class="panel-head">
+            <div><span class="ui-eyebrow">Shipping trend</span><h3 id="weekly-chart-title">Weekly shipping pace</h3></div>
+            <p>Total merges across all authors over the trailing 7 days. Completed UTC days only.</p>
+          </div>
+          <svg viewBox={`0 0 ${CHART.width} ${CHART.height}`} role="img" aria-label="Seven-day rolling total of merged pull requests across all authors">
+            {#each weeklyChart.ticks as tick (tick.value)}
+              <line x1={CHART.left} y1={tick.y} x2={CHART.width - CHART.right} y2={tick.y}></line>
+              <text x={CHART.left - 8} y={tick.y + 4} text-anchor="end">{tick.value}</text>
+            {/each}
+            {#each weeklyChart.labels as label (`${label.x}-${label.label}`)}<text class="x-label" x={label.x} y={CHART.height - 10} text-anchor="middle">{label.label}</text>{/each}
+            {#each weeklyChart.lines as line (line.author)}<polyline points={line.points} style={`--author-color: ${line.color}`}><title>{line.author}: latest {line.total}</title></polyline>{/each}
+          </svg>
+          <div class="legend">{#each weeklyChart.lines as line (line.author)}<span><i style={`--author-color: ${line.color}`}></i>{line.author} · latest {line.total}</span>{/each}</div>
         </section>
 
         <section class="panel chart-panel" aria-labelledby="daily-chart-title">
