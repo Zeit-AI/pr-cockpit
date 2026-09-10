@@ -306,6 +306,60 @@ test("advertised WebSocket failures reconnect without polling and URL changes re
   }
 });
 
+test("an expired session ticket renews on the next tick without backoff", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-relay-expiry-"));
+  try {
+    const script = `
+      const errors = [];
+      console.error = (...args) => errors.push(args.map(String).join(" "));
+      const { createRelayConnection } = await import(${JSON.stringify(relayClientUrl)});
+      const { db } = await import(${JSON.stringify(dbUrl)});
+      class ExpiringSocket {
+        listeners = {};
+        constructor() {
+          queueMicrotask(() => {
+            this.emit("open");
+            this.emit("close", { code: 1008, reason: "authorization expired" });
+          });
+        }
+        addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
+        emit(type, event) { for (const listener of this.listeners[type] ?? []) listener(event); }
+        close() { this.emit("close"); }
+      }
+      let sessions = 0;
+      const fetcher = async (input) => {
+        const url = String(input);
+        if (url.endsWith("/capabilities")) return Response.json({ stream: "websocket-v1" });
+        sessions++;
+        return Response.json({ ticket: "ticket-" + sessions, expiresAt: 1_777_580_800_000, repos: { "acme/app": false } });
+      };
+      const connection = createRelayConnection({
+        fetcher,
+        token: async () => "github-secret",
+        repos: async () => ["acme/app"],
+        now: () => 1_000,
+        socket: () => new ExpiringSocket(),
+      });
+      await connection.tick("https://stream.test");
+      await connection.tick("https://stream.test");
+      console.log(JSON.stringify({ sessions, errors }));
+      db.close();
+    `;
+    const process = Bun.spawn([Bun.which("bun") ?? "bun", "-e", script], {
+      env: { ...Bun.env, COCKPIT_DATA_DIR: dataDir, COCKPIT_MOCK: "1" },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([process.exited, new Response(process.stdout).text(), new Response(process.stderr).text()]);
+    if (exitCode !== 0) throw new Error(stderr);
+    const result = JSON.parse(stdout);
+    expect(result.sessions).toBe(2);
+    expect(result.errors).toEqual([]);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("active WebSocket sessions reconfigure locally without hiding a later peer close", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-relay-repos-"));
   try {

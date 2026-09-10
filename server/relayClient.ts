@@ -225,6 +225,10 @@ export async function streamRelayOnce(
       }
       const code = Number.isInteger(event?.code) ? event.code : 1005;
       const closeReason = event?.reason?.trim().replace(/\s+/g, " ").slice(0, 256);
+      if (opened && code === 1008 && closeReason === "authorization expired") {
+        settle();
+        return;
+      }
       const reason = closeReason ? `, reason=${closeReason}` : "";
       const state = opened ? "closed" : socketFailed ? "failed to open" : "closed before opening";
       settle(new Error(`relay WebSocket ${state} (code=${code}${reason})`));
