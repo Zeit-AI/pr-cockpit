@@ -55,13 +55,23 @@
   // bar above it change height with the PR, and PrDetail.svelte is not ours to restructure.
   $effect(() => {
     if (!root) return;
+    // re-measures until it converges: the first pass runs before the header above has settled, and
+    // sizing this tab is itself what removes the page scroll that shifted the measurement
     const fit = () => {
-      const top = root.getBoundingClientRect().top;
-      height = Math.max(360, document.documentElement.clientHeight - top - BOTTOM_GUTTER);
+      const top = root.getBoundingClientRect().top + window.scrollY;
+      const next = Math.max(360, document.documentElement.clientHeight - top - BOTTOM_GUTTER);
+      if (height === null || Math.abs(next - height) > 1) height = next;
     };
     fit();
+    const observer = new ResizeObserver(fit);
+    observer.observe(document.body);
     window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
+    window.addEventListener("scroll", fit, { passive: true });
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", fit);
+      window.removeEventListener("scroll", fit);
+    };
   });
 
   // keep the newest turn in view as the conversation grows
