@@ -7,6 +7,9 @@
 
   let { repo, number } = $props();
 
+  // the PR view's fixed key bar overlaps the very bottom of the page
+  const BOTTOM_GUTTER = 34;
+
   let state = $state(null);
   let loadError = $state(null);
   let draft = $state("");
@@ -14,6 +17,8 @@
   let sendError = $state(null);
   let input = $state(null);
   let log = $state(null);
+  let root = $state(null);
+  let height = $state(null);
 
   let turns = $derived(state?.turns ?? []);
   let busy = $derived(sending || state?.running === true);
@@ -43,6 +48,20 @@
     if (!busy) return;
     const timer = setInterval(load, 2000);
     return () => clearInterval(timer);
+  });
+
+  // The surrounding PR view flows with the page, but chat and the map each need their own scrollbar,
+  // so this tab claims the rest of the viewport. Measured rather than hard-coded: the header and tab
+  // bar above it change height with the PR, and PrDetail.svelte is not ours to restructure.
+  $effect(() => {
+    if (!root) return;
+    const fit = () => {
+      const top = root.getBoundingClientRect().top;
+      height = Math.max(360, document.documentElement.clientHeight - top - BOTTOM_GUTTER);
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
   });
 
   // keep the newest turn in view as the conversation grows
@@ -83,7 +102,12 @@
   }
 </script>
 
-<div class="review-layout" class:with-html={!!htmlSrc}>
+<div
+  class="review-layout"
+  class:with-html={!!htmlSrc}
+  bind:this={root}
+  style:height={height === null ? null : `${height}px`}
+>
   <section class="chat">
     <div class="chat-log" bind:this={log}>
       {#if loadError}
@@ -152,8 +176,9 @@
     display: flex;
     gap: 12px;
     align-items: stretch;
+    /* until the measuring effect runs, a sane height rather than a collapsed or runaway one */
+    height: 70vh;
     min-height: 0;
-    flex: 1;
   }
 
   .chat {
@@ -162,6 +187,10 @@
     min-width: 0;
     min-height: 0;
     flex: 1;
+  }
+
+  .review-layout > * {
+    min-height: 0;
   }
 
   /* the chat stays the primary surface; the map gets the extra room only once it exists */
