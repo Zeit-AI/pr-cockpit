@@ -43,7 +43,9 @@ function ompModel(model: string): string {
   return model;
 }
 
-export function harnessFlags(prompt: string, model: string, useContinue: boolean, harness: Harness): string[] {
+// extra readable roots for the agent. Only Claude needs (and understands) an explicit grant: the omp
+// and codex invocations already run with approvals bypassed, so they can read the path regardless.
+export function harnessFlags(prompt: string, model: string, useContinue: boolean, harness: Harness, addDirs: string[] = []): string[] {
   if (harness === "codex") {
     const args = useContinue ? ["exec", "resume", "--last"] : ["exec"];
     args.push(
@@ -62,10 +64,11 @@ export function harnessFlags(prompt: string, model: string, useContinue: boolean
     return args;
   }
   const args = ["-p", prompt, "--model", model, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
+  for (const dir of addDirs) args.push("--add-dir", dir);
   if (useContinue) args.push("--continue");
   return args;
 }
 
-export function harnessArgs(prompt: string, model: string, useContinue = false, harness: Harness = agentHarness()): string[] {
-  return [harnessBin(harness), ...harnessFlags(prompt, model, useContinue, harness)];
+export function harnessArgs(prompt: string, model: string, useContinue = false, harness: Harness = agentHarness(), addDirs: string[] = []): string[] {
+  return [harnessBin(harness), ...harnessFlags(prompt, model, useContinue, harness, addDirs)];
 }

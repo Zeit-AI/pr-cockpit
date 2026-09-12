@@ -510,3 +510,21 @@ export async function fetchGithubUsage() {
   if (!res.ok) throw new Error(`github usage ${res.status}`);
   return await res.json();
 }
+
+export async function fetchReviewState(repo, number) {
+  const res = await fetch(`/api/review/${repo}/${number}/state`);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error || `review state ${res.status}`);
+  return body;
+}
+
+export async function askReview(repo, number, message) {
+  const res = await fetch(`/api/review/${repo}/${number}/ask`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error || `review ask ${res.status}`);
+  return body;
+}

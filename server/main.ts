@@ -13,7 +13,6 @@ import { installMockNetworkGuard, isMockGithub, seedMockDatabase } from "./mockG
 import { mergeRendererOrigins, startCockpitServer } from "./cockpitServer.ts";
 import { ensureOmpInstalled } from "./commitMessage.ts";
 import { replicaEnabled, startReplicaSync } from "./replica.ts";
-import { captureFatal, startSentry } from "./sentry.ts";
 import { startTailscaleServe } from "./tailscaleServe.ts";
 import { conflictingSupervisor } from "./supervisor.ts";
 
@@ -26,7 +25,6 @@ if (supervisorConflict) {
 
 try {
   installMockNetworkGuard();
-  if (!isMockGithub) startSentry();
   seedSettings();
   if (isMockGithub) {
     if (!Bun.env.COCKPIT_DATA_DIR) throw new Error("COCKPIT_MOCK requires an explicit COCKPIT_DATA_DIR");
@@ -62,6 +60,5 @@ try {
   console.log(`pr-cockpit server listening on http://127.0.0.1:${port} (pid ${process.pid})`);
 } catch (err) {
   console.error(`pr-cockpit server failed to start on http://127.0.0.1:${port} (pid ${process.pid}):`, err);
-  await captureFatal(err);
   process.exit(1);
 }

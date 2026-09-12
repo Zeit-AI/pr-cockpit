@@ -114,6 +114,8 @@ import {
   listFixerAgents,
   type AgentRow,
 } from "./agents.ts";
+import { askReview, currentPrHead, reviewAgentRunning } from "./reviewAgent.ts";
+import { readReviewMeta, readTranscript, resolveReviewFile, reviewContentType, reviewDir, REVIEW_HTML } from "./reviews.ts";
 import { checkForUpdate, isUpdateAvailable, runningRev, updatesEnabled } from "./version.ts";
 import { spawn } from "node:child_process";
 import { repoUsersCached } from "./repoUsers.ts";
@@ -2795,6 +2797,67 @@ async function handleSwitchBranch(req: Request): Promise<Response> {
   return json({ ok: true, checkoutPath, previousBranch, branch: headRef });
 }
 
+// "/review/owner/repo/123/rest..." and its "/api"-prefixed twin. The bare form is what the iframe
+// loads; the /api form is what the Vite dev proxy already forwards. Both reach the same files.
+function reviewRoute(parts: string[]): { repo: string; number: number; rest: string } | null {
+  // index of the owner segment: one past the "review" marker in either spelling
+  const at = parts[0] === "api" && parts[1] === "review" ? 2 : parts[0] === "review" ? 1 : -1;
+  if (at < 0 || parts.length < at + 3) return null;
+  const owner = parts[at]!;
+  const name = parts[at + 1]!;
+  const number = Number(parts[at + 2]);
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return { repo: `${owner}/${name}`, number, rest: parts.slice(at + 3).join("/") };
+}
+
+async function handleReviewState(repo: string, number: number): Promise<Response> {
+  const dir = reviewDir(repo, number);
+  const meta = await readReviewMeta(repo, number);
+  const htmlExists = await Bun.file(`${dir}/${REVIEW_HTML}`).exists();
+  const headSha = currentPrHead(repo, number);
+  return json({
+    turns: await readTranscript(repo, number),
+    htmlExists,
+    headSha,
+    htmlHeadSha: meta.htmlHeadSha,
+    htmlUpdatedAt: meta.htmlUpdatedAt,
+    // only a materialized HTML page can be stale; an empty tab is not
+    stale: Boolean(htmlExists && headSha && meta.htmlHeadSha && meta.htmlHeadSha !== headSha),
+    model: meta.model,
+    running: reviewAgentRunning(repo, number),
+  });
+}
+
+async function handleReviewAsk(repo: string, number: number, req: Request): Promise<Response> {
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "invalid JSON body" }, 400);
+  }
+  const message = body && typeof body === "object" && "message" in body ? body.message : null;
+  if (typeof message !== "string" || message.trim() === "") return json({ error: "message is required" }, 400);
+  try {
+    return json({ answer: await askReview(repo, number, message.trim()) });
+  } catch (err) {
+    const text = err instanceof Error ? err.message : String(err);
+    return json({ error: text }, /already answering/.test(text) ? 409 : 502);
+  }
+}
+
+async function handleReviewFile(repo: string, number: number, rest: string): Promise<Response> {
+  const relative = rest === "" ? REVIEW_HTML : rest;
+  const resolved = resolveReviewFile(repo, number, relative);
+  if (!resolved) return new Response("not found", { status: 404 });
+  const file = Bun.file(resolved);
+  if (!(await file.exists())) return new Response("not found", { status: 404 });
+  return new Response(file, {
+    // the agent rewrites these in place; a cached copy would hide the update the iframe reloads for
+    // typed off the resolved path so a percent-encoded request still gets the file's real type
+    headers: { "Content-Type": reviewContentType(resolved), "Cache-Control": "no-store" },
+  });
+}
+
 export function buildFetchHandler(port: number, dependencyOverrides: Partial<HttpDependencies> = {}) {
   const dependencies: HttpDependencies = { ...defaultHttpDependencies, ...dependencyOverrides };
   const runtime: HttpRuntime = {
@@ -3100,6 +3163,12 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
       const detail = await agentRunDetail(id);
       if (!detail) return json({ error: "no such run" }, 404);
       return json(detail);
+    }
+    const review = reviewRoute(parts);
+    if (review) {
+      if (req.method === "POST" && review.rest === "ask") return handleReviewAsk(review.repo, review.number, req);
+      if (req.method === "GET" && review.rest === "state") return handleReviewState(review.repo, review.number);
+      if (req.method === "GET") return handleReviewFile(review.repo, review.number, review.rest);
     }
     if (
       req.method === "GET" &&

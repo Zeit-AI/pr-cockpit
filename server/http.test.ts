@@ -2073,3 +2073,70 @@ describe("Actions viewer API", () => {
     }
   });
 });
+
+describe("review routes", () => {
+  const repo = "http-review/companion";
+  const number = 314159;
+
+  async function withReviewDataDir(body: (handler: (req: Request) => Promise<Response>, dataDir: string) => Promise<void>) {
+    const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-review-routes-"));
+    const previous = Bun.env.COCKPIT_DATA_DIR;
+    Bun.env.COCKPIT_DATA_DIR = dataDir;
+    try {
+      await body(buildFetchHandler(4820), dataDir);
+    } finally {
+      if (previous === undefined) delete Bun.env.COCKPIT_DATA_DIR;
+      else Bun.env.COCKPIT_DATA_DIR = previous;
+      rmSync(dataDir, { recursive: true, force: true });
+    }
+  }
+
+  const reviewDirFor = (dataDir: string) => `${dataDir}/reviews/${repo.replace("/", "__")}/pr-${number}`;
+
+  test("reports an empty review before the agent has ever run", async () => {
+    await withReviewDataDir(async (handler) => {
+      const response = await handler(new Request(`http://127.0.0.1:4820/review/${repo}/${number}/state`));
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ turns: [], htmlExists: false, stale: false, running: false });
+    });
+  });
+
+  test("serves the agent's HTML at the iframe path, uncached, under either URL spelling", async () => {
+    await withReviewDataDir(async (handler, dataDir) => {
+      mkdirSync(reviewDirFor(dataDir), { recursive: true });
+      writeFileSync(`${reviewDirFor(dataDir)}/index.html`, "<h1>map</h1>");
+      for (const path of [`/review/${repo}/${number}/index.html`, `/api/review/${repo}/${number}/index.html`]) {
+        const response = await handler(new Request(`http://127.0.0.1:4820${path}`));
+        expect(response.status).toBe(200);
+        expect(response.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+        expect(response.headers.get("Cache-Control")).toBe("no-store");
+        expect(await response.text()).toBe("<h1>map</h1>");
+      }
+      const state = await (await handler(new Request(`http://127.0.0.1:4820/review/${repo}/${number}/state`))).json();
+      expect(state.htmlExists).toBe(true);
+    });
+  });
+
+  test("refuses to serve anything outside the PR's own review directory", async () => {
+    await withReviewDataDir(async (handler, dataDir) => {
+      mkdirSync(`${dataDir}/reviews/${repo.replace("/", "__")}`, { recursive: true });
+      writeFileSync(`${dataDir}/reviews/${repo.replace("/", "__")}/secret.txt`, "nope");
+      for (const path of ["../secret.txt", "..%2Fsecret.txt", "a/../../secret.txt"]) {
+        const response = await handler(new Request(`http://127.0.0.1:4820/review/${repo}/${number}/${path}`));
+        expect(response.status).toBe(404);
+      }
+    });
+  });
+
+  test("rejects an empty ask instead of spawning an agent", async () => {
+    await withReviewDataDir(async (handler) => {
+      const response = await handler(new Request(`http://127.0.0.1:4820/review/${repo}/${number}/ask`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message: "   " }),
+      }));
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "message is required" });
+    });
+  });
+});

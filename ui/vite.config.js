@@ -10,6 +10,8 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": "http://127.0.0.1:4820",
+      // the review tab's iframe loads the agent-written HTML from the server's own path, not /api
+      "/review": "http://127.0.0.1:4820",
     },
   },
 });
