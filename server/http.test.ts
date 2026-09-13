@@ -2097,7 +2097,15 @@ describe("review routes", () => {
     await withReviewDataDir(async (handler) => {
       const response = await handler(new Request(`http://127.0.0.1:4820/review/${repo}/${number}/state`));
       expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ turns: [], htmlExists: false, stale: false, running: false });
+      expect(await response.json()).toMatchObject({
+        turns: [],
+        htmlExists: false,
+        stale: false,
+        running: false,
+        queued: [],
+        agentTurns: [],
+        config: { model: "claude-opus-5[1m]", effort: "medium" },
+      });
     });
   });
 
@@ -2125,6 +2133,29 @@ describe("review routes", () => {
         const response = await handler(new Request(`http://127.0.0.1:4820/review/${repo}/${number}/${path}`));
         expect(response.status).toBe(404);
       }
+    });
+  });
+
+  test("exposes the review model and effort, and rejects nonsense", async () => {
+    await withReviewDataDir(async (handler) => {
+      const initial = await (await handler(new Request("http://127.0.0.1:4820/review/config"))).json() as { models: Array<{ id: string }> };
+      expect(initial).toMatchObject({ model: "claude-opus-5[1m]", effort: "medium" });
+      expect(initial.models.some((m: { id: string }) => m.id === "claude-sonnet-5")).toBe(true);
+
+      const saved = await (await handler(new Request("http://127.0.0.1:4820/api/review/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-5", effort: "xhigh" }),
+      }))).json();
+      expect(saved).toMatchObject({ model: "claude-sonnet-5", effort: "xhigh" });
+
+      // an unusable model or effort would break every later spawn, so both fall back instead
+      const reset = await (await handler(new Request("http://127.0.0.1:4820/review/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "rm -rf /", effort: "ludicrous" }),
+      }))).json();
+      expect(reset).toMatchObject({ model: "claude-opus-5[1m]", effort: "medium" });
     });
   });
 

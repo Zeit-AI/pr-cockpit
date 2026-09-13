@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendReviewTurn,
+  listReviewPrs,
   parseTranscript,
   readReviewMeta,
   readTranscript,
@@ -89,6 +90,31 @@ describe("transcript", () => {
   test("an empty or absent transcript is no turns, not an error", async () => {
     expect(await readTranscript("owner/repo", 99)).toEqual([]);
     expect(parseTranscript("")).toEqual([]);
+  });
+});
+
+describe("the message queue in meta", () => {
+  test("round-trips pending messages and tolerates an older or hand-edited file", async () => {
+    await writeReviewMeta("owner/repo", 31, { pending: ["first", "second"] });
+    expect((await readReviewMeta("owner/repo", 31)).pending).toEqual(["first", "second"]);
+    await writeReviewMeta("owner/repo", 31, { pending: ["second"] });
+    expect((await readReviewMeta("owner/repo", 31)).pending).toEqual(["second"]);
+
+    // a meta.json written before the queue existed, and one with the wrong shape, must both drain cleanly
+    await Bun.write(`${reviewDir("owner/repo", 32)}/meta.json`, JSON.stringify({ model: "opus" }));
+    expect((await readReviewMeta("owner/repo", 32)).pending).toEqual([]);
+    await Bun.write(`${reviewDir("owner/repo", 33)}/meta.json`, JSON.stringify({ pending: "nope" }));
+    expect((await readReviewMeta("owner/repo", 33)).pending).toEqual([]);
+  });
+});
+
+describe("listReviewPrs", () => {
+  test("finds every PR with a review directory so queues resume after a restart", async () => {
+    await writeReviewMeta("owner/repo", 41, { pending: ["q"] });
+    await writeReviewMeta("other/thing", 42, {});
+    const found = listReviewPrs();
+    expect(found).toContainEqual({ repo: "owner/repo", number: 41 });
+    expect(found).toContainEqual({ repo: "other/thing", number: 42 });
   });
 });
 

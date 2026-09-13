@@ -4,11 +4,68 @@
 
 PR Cockpit is a desktop app for GitHub pull requests on **macOS and Linux**. A local mirror, kept current by webhooks, holds every PR you care about, so the queue, the diff, the failed check logs and the review threads paint from disk. Keyboard for everything; GitHub stays the source of truth.
 
-[Install](#install) · [See the workflow](#from-finding-the-pr-to-finishing-the-review) · [CLI for humans and agents](#the-same-pr-context-in-your-terminal) · [Website](https://prcockpit.com/)
+[Zeit AI instructions](#zeit-ai-specific-instructions) · [Install](#install) · [See the workflow](#from-finding-the-pr-to-finishing-the-review) · [CLI for humans and agents](#the-same-pr-context-in-your-terminal) · [Website](https://prcockpit.com/)
 
 ![PR Cockpit showing the review queue for microsoft/vscode, grouped into ready to merge and waiting](docs/screenshots/landing-inbox.png)
 
 The queue separates **ready to merge**, **your move**, and **waiting**. Checks, conflicts, unresolved threads, and review state give you the context to decide what to open next. Stacked pull requests stay together.
+
+## Zeit AI-specific instructions
+
+This is Zeit AI's fork of [`theolundqvist/pr-cockpit`](https://github.com/theolundqvist/pr-cockpit). Install it from **this** repository, not upstream — the commands further down point at the original.
+
+### What we added
+
+**A Review tab on every PR (<kbd>⌘5</kbd>).** An ongoing chat with an agent that knows the PR *and* the code around it. It reads the whole repository at the PR head, not just the diff, so "why is there a union visitor in `appRouter.ts` that special-cases remote tables?" gets a real answer with file and line references.
+
+- The agent answers in chat and maintains a **visual overview** — a self-contained `index.html` rendered beside the chat. Call graphs, component trees, use-site tables, blast radius, quizzes. It extends that page across the conversation rather than regenerating it.
+- **Prompt buttons** (Overview, Call traces, Blast radius, Quiz) queue a canned message. Nothing special happens server-side; edit `ui/src/lib/reviewPrompts.js` to change them.
+- **Messages queue.** Send while the agent is working and it answers them in order. The queue is on disk, so closing the tab or restarting Cockpit does not lose a question.
+- **Live progress** shows the agent's tool calls as they happen, the same turn-by-turn view as the Agents tab.
+- **Model and thinking effort** are set from the control beside the composer. Default: Opus 5 with the 1M-token context window, medium effort.
+- The conversation, the HTML, and the queue live in `$COCKPIT_DATA_DIR/reviews/<owner>__<repo>/pr-<N>/` and are never swept. Sessions resume across restarts.
+- The agent is read-only against GitHub and against the PR worktree. It never commits, pushes, comments, reviews, or merges.
+
+**Sentry is disabled.** `startSentry()` is removed from server startup; no crash telemetry leaves the machine.
+
+Everything else is upstream behaviour and upstream documentation.
+
+### Install this fork
+
+Run this in your terminal as your normal user, **not with `sudo`**:
+
+```sh
+git clone git@github.com:Zeit-AI/pr-cockpit.git ~/code/pr-cockpit
+cd ~/code/pr-cockpit
+scripts/install
+```
+
+`scripts/install` reconciles everything: dependencies, the desktop app, the `pr-cockpit` CLI, and the launch agent. The installed app runs from whichever checkout you installed it from, so keep the clone where you want it to live.
+
+If the installer stops with `port 4820 is already serving another app`, an older Cockpit is still running. Point the launch agent at this checkout and restart it:
+
+```sh
+launchctl bootout gui/$(id -u)/app.pr-cockpit.server
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.pr-cockpit.server.plist
+curl -fsS http://127.0.0.1:4820/healthz    # "root" should be your checkout
+```
+
+`launchctl kickstart -k` is not enough on its own — launchd keeps the old plist until you bootstrap it again.
+
+### Updating
+
+`scripts/update` pulls `origin`, which is this fork. To take changes from upstream deliberately:
+
+```sh
+git remote add upstream https://github.com/theolundqvist/pr-cockpit.git   # once
+git fetch upstream && git merge upstream/main
+```
+
+All Review-tab code lives in its own files (`server/review*.ts`, `ui/src/lib/Review*.svelte`). `ui/src/lib/PrDetail.svelte` — 200 KB in one file, and the one place upstream and this fork both edit — is touched in exactly three lines, so those merges stay clean. Keep it that way.
+
+### Requirements
+
+The review agent drives the `claude` CLI. Install it and sign in (`claude`), then check Settings → agent harness says `claude`; with `omp` selected and no omp login, review messages fail with `No API key found for anthropic`.
 
 ## Install
 

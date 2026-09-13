@@ -6,6 +6,7 @@ import { startDaemonWatch } from "./daemonWatch.ts";
 import { startRelayClient } from "./relayClient.ts";
 import { startUpdateCheck } from "./version.ts";
 import { startFixerSupervision } from "./agents.ts";
+import { startReviewQueues } from "./reviewAgent.ts";
 import { startForwarders } from "./forwarders.ts";
 import { startWebhooks } from "./webhooks.ts";
 import { buildFetchHandler } from "./http.ts";
@@ -47,6 +48,7 @@ try {
     startDaemonWatch();
     startRelayClient();
     startFixerSupervision();
+    startReviewQueues();
     void ensureOmpInstalled().catch((error) => console.error("background OMP installation failed:", error));
     startWebhooks();
   }

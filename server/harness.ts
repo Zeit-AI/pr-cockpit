@@ -43,32 +43,63 @@ function ompModel(model: string): string {
   return model;
 }
 
-// extra readable roots for the agent. Only Claude needs (and understands) an explicit grant: the omp
-// and codex invocations already run with approvals bypassed, so they can read the path regardless.
-export function harnessFlags(prompt: string, model: string, useContinue: boolean, harness: Harness, addDirs: string[] = []): string[] {
+// Optional per-run extras. Only Claude understands all three; the omp and codex invocations already
+// run with approvals bypassed, so they can read an added directory without being granted it.
+export interface HarnessExtras {
+  addDirs?: string[];
+  // low | medium | high | xhigh | max, as the harness defines them
+  effort?: string;
+  appendSystemPrompt?: string;
+}
+
+// codex spells effort as a config value and has no notion of "xhigh"/"max"
+function codexEffort(effort: string | undefined, model: string): string {
+  if (effort === "low" || effort === "medium" || effort === "high") return effort;
+  if (effort) return "high";
+  return model.includes("sonnet") ? "medium" : "high";
+}
+
+export function harnessFlags(
+  prompt: string,
+  model: string,
+  useContinue: boolean,
+  harness: Harness,
+  extras: HarnessExtras = {},
+): string[] {
   if (harness === "codex") {
     const args = useContinue ? ["exec", "resume", "--last"] : ["exec"];
     args.push(
       "--json",
       "--dangerously-bypass-approvals-and-sandbox",
       "-c",
-      `model_reasoning_effort="${model === "sonnet" ? "medium" : "high"}"`,
-      prompt,
+      `model_reasoning_effort="${codexEffort(extras.effort, model)}"`,
+      // codex has no system-prompt flag, so the agent's standing instructions ride with the message
+      extras.appendSystemPrompt ? `${extras.appendSystemPrompt}\n\n${prompt}` : prompt,
     );
     return args;
   }
   if (harness === "omp") {
     const args = ["--print", "--mode", "json", "--model", ompModel(model), "--auto-approve", "--no-title"];
     if (useContinue) args.push("--continue");
-    args.push(prompt);
+    // omp has no system-prompt flag either
+    args.push(extras.appendSystemPrompt ? `${extras.appendSystemPrompt}\n\n${prompt}` : prompt);
     return args;
   }
   const args = ["-p", prompt, "--model", model, "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose"];
-  for (const dir of addDirs) args.push("--add-dir", dir);
+  for (const dir of extras.addDirs ?? []) args.push("--add-dir", dir);
+  if (extras.effort) args.push("--effort", extras.effort);
+  // appended, not replaced: the harness's own tool instructions still apply
+  if (extras.appendSystemPrompt) args.push("--append-system-prompt", extras.appendSystemPrompt);
   if (useContinue) args.push("--continue");
   return args;
 }
 
-export function harnessArgs(prompt: string, model: string, useContinue = false, harness: Harness = agentHarness(), addDirs: string[] = []): string[] {
-  return [harnessBin(harness), ...harnessFlags(prompt, model, useContinue, harness, addDirs)];
+export function harnessArgs(
+  prompt: string,
+  model: string,
+  useContinue = false,
+  harness: Harness = agentHarness(),
+  extras: HarnessExtras = {},
+): string[] {
+  return [harnessBin(harness), ...harnessFlags(prompt, model, useContinue, harness, extras)];
 }

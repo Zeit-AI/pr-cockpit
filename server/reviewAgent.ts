@@ -1,12 +1,14 @@
 import { closeSync, existsSync, openSync, statSync } from "node:fs";
 import { getCachedPrDetail, getPr } from "./db.ts";
 import { prKeyOf } from "./prKey.ts";
-import { agentModel } from "./settings.ts";
 import { harnessArgs } from "./harness.ts";
 import { materializePrWorktree, prWorktreeDir } from "./mirror.ts";
-import { turnsFromLines } from "./agents.ts";
+import { turnsFromLines, type AgentTurn } from "./agents.ts";
+import { reviewConfig } from "./reviewConfig.ts";
 import {
   appendReviewTurn,
+  appendReviewTurnOnce,
+  listReviewPrs,
   readReviewMeta,
   reviewDir,
   reviewLogPath,
@@ -14,13 +16,25 @@ import {
   writeReviewMeta,
 } from "./reviews.ts";
 
-// One review agent per PR at a time, the same guard the fixer/autofix/custom agents use. Deliberately
-// NOT a fixer_agents or agent_runs row: finishRun() closes every running row for a (repo, number), so a
-// review run sharing the table would corrupt a concurrently running fixer's bookkeeping.
-const inFlight = new Map<string, Promise<string>>();
+// One review agent per PR at a time, the same guard the fixer/autofix/custom agents use, but messages
+// arriving while it runs queue instead of being refused. Deliberately NOT a fixer_agents or agent_runs
+// row: finishRun() closes every running row for a (repo, number), so a review run sharing the table
+// would corrupt a concurrently running fixer's bookkeeping.
+interface ReviewRun {
+  startedAt: string;
+  logPath: string;
+  message: string;
+}
 
-export function reviewAgentRunning(repo: string, number: number): boolean {
-  return inFlight.has(prKeyOf(repo, number));
+const active = new Map<string, ReviewRun>();
+const draining = new Set<string>();
+
+export interface ReviewActivity {
+  running: boolean;
+  startedAt: string | null;
+  currentMessage: string | null;
+  queued: string[];
+  turns: AgentTurn[];
 }
 
 export function currentPrHead(repo: string, number: number): string | null {
@@ -48,23 +62,33 @@ function prRefs(repo: string, number: number): { baseRef: string; headRef: strin
   }
 }
 
+// The agent's standing identity. Sent as an appended system prompt where the harness has one, so the
+// reviewer's message stays the reviewer's message. It establishes the interfaces - the repository at
+// head, the CLI, and the HTML that this tab renders - so individual questions never have to restate them.
 function systemPrompt(repo: string, number: number, baseRef: string, headRef: string, worktree: string): string {
-  return `You are the review companion inside PR Cockpit for the pull request ${repo}#${number} (branch "${headRef}" into "${baseRef}"). You are talking to the reviewer, in an ongoing conversation that spans days.
+  return `You are the review companion inside PR Cockpit for the pull request ${repo}#${number} (branch "${headRef}" into "${baseRef}"). You are talking to the reviewer, in one ongoing conversation that spans days.
+
+YOUR TWO OUTPUTS
+1. Chat. Whatever you say is shown to the reviewer as the reply to their message.
+2. \`index.html\` in your working directory. PR Cockpit renders it live in an iframe beside the chat, as this PR's visual overview. It is the only file the reviewer sees besides the chat.
+
+Every question implies both. Anything structural, spatial, or relational - call graphs, component trees, module maps, sequences, use-site tables, blast radius, quizzes - belongs in the HTML without being asked. Short factual answers stay in chat and leave the HTML alone. Never ask which one the reviewer wants, and never tell them to ask for a visualisation.
 
 WHAT YOU CAN SEE
-- ${worktree} is a full checkout of the repository at this PR's head, granted to you as an added directory. Read and grep it freely. Most questions are about the code AROUND the change, not only the diff - when the reviewer asks about a symbol, a pattern, or a subsystem, go find it in the repository and answer from what is actually there.
+- ${worktree} is a full checkout of this repository at the PR head, granted to you as an added directory. Read and grep it freely. Most questions are about the code AROUND the change, not only the diff - when the reviewer asks about a symbol, a pattern, or a subsystem, go find it and answer from what is actually there.
 - \`pr-cockpit ${repo}#${number}\` is the PR itself: plain for state, \`--diff\` for the unified diff, \`--file PATH\` for a file at the head, \`--logs\` for failed check logs, \`--jobs\` for Actions state.
-- Your working directory is yours. \`index.html\`, \`transcript.md\` and \`meta.json\` live here.
+- Your working directory is yours. \`index.html\`, \`transcript.md\` and \`meta.json\` live there.
 
-WHAT YOU PRODUCE
-- Short, sharp answers in chat. No preamble, no announcing what you are about to do, no restating the question, no closing summary. If the answer is two sentences, write two sentences.
-- Anything structural, spatial, or relational goes into \`index.html\` in your working directory: call graphs, component trees, module maps, sequences, use-site tables, blast radius, quizzes. Short factual answers stay in chat and do not touch the HTML.
-- When you change the HTML, say so in one short line rather than describing its contents back to the reviewer.
+HOW YOU ANSWER
+- Sharp. No preamble, no announcing what you are about to do, no restating the question, no closing summary. If the answer is two sentences, write two sentences.
+- When you change the HTML, say so in one short line rather than describing its contents back.
 
 THE HTML
-- Update and EXTEND \`index.html\` across the conversation. Read it first, add to it, keep every existing section unless the reviewer asks for it to go. Never regenerate it from scratch.
+- Update and EXTEND it across the conversation. Read it first, add to it, keep every existing section unless the reviewer asks for it to go. Never regenerate it from scratch.
 - Fully self-contained: all CSS and JS inline, no CDN links, no external fonts, no images fetched over the network, no runtime network calls of any kind. It must render completely with the machine offline, interactive parts included.
-- Dark-first and quiet, matching Cockpit: near-black background, restrained type, minimal chrome, no framework look. It is a map, not a report.
+- LIGHT THEME FIRST. Cockpit is usually in light mode, so light is the default: a white or near-white ground with dark text. Also support dark, and follow the host: Cockpit loads the page with \`?theme=light\` or \`?theme=dark\` in the URL and posts \`{ type: "cockpit-theme", theme }\` to it on every change, so read the query parameter on load, listen for that message, and set a \`data-theme\` attribute on \`<html>\` that your CSS keys on. Fall back to \`prefers-color-scheme\` when neither is present. Define both palettes as variables; never leave a colour defined in only one theme.
+- Quiet and dense, matching Cockpit: restrained type, minimal chrome, no framework look. It is a map, not a report.
+- It must not scroll horizontally at any width. Give every wide table, diagram, or code block its own \`overflow-x: auto\` container so it scrolls inside its own box, and let the page itself stay within the frame.
 
 WHAT THE REVIEWER CARES ABOUT
 - What behaves differently after this PR, and for whom.
@@ -81,30 +105,24 @@ HARD RULES
 - Do not write \`transcript.md\` or \`meta.json\` - Cockpit owns both.`;
 }
 
-function firstPrompt(repo: string, number: number, baseRef: string, headRef: string, worktree: string, message: string): string {
-  return `${systemPrompt(repo, number, baseRef, headRef, worktree)}
-
-REVIEWER:
-${message}`;
-}
-
-function nextPrompt(worktree: string, message: string): string {
-  return `Same PR, same conversation. The rules from the first message still hold: sharp answers in chat, structural work extends ${REVIEW_HTML} in this directory without discarding existing sections, self-contained HTML with no network use, and nothing at all is ever written into ${worktree}.
-
-REVIEWER:
-${message}`;
+// harnesses without a system-prompt flag get the same text folded into the message by harnessFlags
+function continuationPreamble(): string {
+  return "Same PR, same conversation. Your standing instructions still hold.";
 }
 
 // the harnesses all stream one JSON event per line; the final "result" turn is the answer the reviewer sees
-async function answerFromLog(logPath: string): Promise<string> {
-  const file = Bun.file(logPath);
-  if (!(await file.exists())) return "";
-  const lines = (await file.text()).split("\n").filter((line) => line.trim() !== "");
-  const turns = turnsFromLines(lines);
+function answerFromTurns(turns: AgentTurn[]): string {
   const result = turns.filter((turn) => turn.kind === "result" && !turn.isError).at(-1);
   if (result?.text?.trim()) return result.text.trim();
   const text = turns.filter((turn) => turn.kind === "text" && turn.text?.trim()).at(-1);
   return text?.text?.trim() ?? "";
+}
+
+async function turnsFromLog(logPath: string): Promise<AgentTurn[]> {
+  const file = Bun.file(logPath);
+  if (!(await file.exists())) return [];
+  const lines = (await file.text()).split("\n").filter((line) => line.trim() !== "");
+  return turnsFromLines(lines);
 }
 
 function htmlTouchedSince(dir: string, sinceMs: number): boolean {
@@ -115,7 +133,8 @@ function htmlTouchedSince(dir: string, sinceMs: number): boolean {
   }
 }
 
-async function runAsk(repo: string, number: number, message: string): Promise<string> {
+async function runOne(repo: string, number: number, message: string): Promise<void> {
+  const key = prKeyOf(repo, number);
   const dir = reviewDir(repo, number);
   const headSha = currentPrHead(repo, number);
   const { baseRef, headRef } = prRefs(repo, number);
@@ -129,41 +148,101 @@ async function runAsk(repo: string, number: number, message: string): Promise<st
   // only a run that actually completed leaves a resumable session behind, so a failed first ask
   // does not strand every later message on a --continue that has nothing to continue
   const useContinue = meta.sessionStarted === true;
-  const model = agentModel("review");
+  const { model, effort } = reviewConfig();
   const startedAt = new Date().toISOString();
   const logPath = reviewLogPath(repo, number, startedAt);
+  active.set(key, { startedAt, logPath, message });
+  await appendReviewTurnOnce(repo, number, "user", message);
 
-  await appendReviewTurn(repo, number, "user", message);
-
-  const prompt = useContinue ? nextPrompt(worktree, message) : firstPrompt(repo, number, baseRef, headRef, worktree, message);
+  const system = systemPrompt(repo, number, baseRef, headRef, worktree);
+  const prompt = useContinue ? `${continuationPreamble()}\n\n${message}` : message;
   const logFd = openSync(logPath, "a");
   // strip inherited API keys so the agent authenticates via the harness's own login
   const { ANTHROPIC_API_KEY: _anthropicKey, OPENAI_API_KEY: _openaiKey, CODEX_API_KEY: _codexKey, ...env } = process.env;
-  const args = harnessArgs(prompt, model, useContinue, undefined, [worktree]);
+  const args = harnessArgs(prompt, model, useContinue, undefined, {
+    addDirs: [worktree],
+    effort,
+    appendSystemPrompt: system,
+  });
   const startedMs = Date.now();
   const proc = Bun.spawn(args, { cwd: dir, env, stdout: logFd, stderr: logFd, stdin: "ignore" });
   const exitCode = await proc.exited;
   closeSync(logFd);
 
-  const answer = await answerFromLog(logPath);
+  const answer = answerFromTurns(await turnsFromLog(logPath));
   const failed = exitCode !== 0 && answer === "";
-  const text = failed ? `The review agent exited with code ${exitCode} and produced no answer. Its log is at ${logPath}.` : answer;
-  await appendReviewTurn(repo, number, "agent", text || "(no answer)");
+  const text = failed
+    ? `The review agent exited with code ${exitCode} and produced no answer. Its log is at ${logPath}.`
+    : answer || "(no answer)";
+  await appendReviewTurn(repo, number, "agent", text);
 
   const htmlWritten = htmlTouchedSince(dir, startedMs);
   await writeReviewMeta(repo, number, {
     headSha,
     model,
+    effort,
     sessionStarted: meta.sessionStarted === true || exitCode === 0,
     ...(htmlWritten ? { htmlHeadSha: headSha, htmlUpdatedAt: new Date().toISOString() } : {}),
   });
-  return text;
 }
 
-export function askReview(repo: string, number: number, message: string): Promise<string> {
+async function drain(repo: string, number: number): Promise<void> {
   const key = prKeyOf(repo, number);
-  if (inFlight.has(key)) throw new Error("a review agent is already answering for this PR - wait for it to finish");
-  const promise = runAsk(repo, number, message).finally(() => inFlight.delete(key));
-  inFlight.set(key, promise);
-  return promise;
+  if (draining.has(key)) return;
+  draining.add(key);
+  try {
+    for (;;) {
+      const meta = await readReviewMeta(repo, number);
+      const next = meta.pending[0];
+      if (next === undefined) return;
+      try {
+        await runOne(repo, number, next);
+      } catch (err) {
+        // a failed message must not wedge the queue - record it and move on to the next
+        await appendReviewTurn(repo, number, "agent", `The review agent could not run: ${err instanceof Error ? err.message : String(err)}`);
+      } finally {
+        active.delete(key);
+        const after = await readReviewMeta(repo, number);
+        await writeReviewMeta(repo, number, { pending: after.pending.slice(1) });
+      }
+    }
+  } finally {
+    draining.delete(key);
+    active.delete(key);
+  }
+}
+
+// Returns as soon as the message is durably queued. The answer lands in transcript.md whenever the
+// agent finishes, so a closed tab, a navigation, or a server restart never loses it.
+export async function enqueueReview(repo: string, number: number, message: string): Promise<number> {
+  const meta = await readReviewMeta(repo, number);
+  const pending = [...meta.pending, message];
+  await writeReviewMeta(repo, number, { pending });
+  void drain(repo, number).catch((err) => console.error(`review queue crashed for ${repo}#${number}:`, err));
+  return pending.length;
+}
+
+export async function reviewActivity(repo: string, number: number): Promise<ReviewActivity> {
+  const key = prKeyOf(repo, number);
+  const run = active.get(key);
+  const meta = await readReviewMeta(repo, number);
+  return {
+    running: run !== undefined,
+    startedAt: run?.startedAt ?? null,
+    currentMessage: run?.message ?? null,
+    // the head of pending is whatever is running (or about to), so the queue behind it is the rest
+    queued: run ? meta.pending.slice(1) : meta.pending,
+    turns: run ? await turnsFromLog(run.logPath) : [],
+  };
+}
+
+// A restart drops the in-memory drain loops, but the queue is in meta.json - pick every one back up
+// rather than leaving a reviewer's question answered by nobody.
+export function startReviewQueues(): void {
+  for (const { repo, number } of listReviewPrs()) {
+    void (async () => {
+      const meta = await readReviewMeta(repo, number);
+      if (meta.pending.length > 0) await drain(repo, number);
+    })().catch((err) => console.error(`review queue resume failed for ${repo}#${number}:`, err));
+  }
 }

@@ -2481,10 +2481,10 @@
         <a class="tab" class:active={tab === "agents"} href="#/pr/{repo}/{number}/agents" onclick={(event) => guardTabNavigation(event, "agents")}>
           Agents {#if agent?.state === "running"}<span class="tab-count">1</span>{/if} {#if tab !== "agents"}<Kbd keys="⌘3" />{/if}
         </a>
-        <a class="tab" class:active={tab === "review"} href="#/pr/{repo}/{number}/review" onclick={(event) => guardTabNavigation(event, "review")}>Review {#if tab !== "review"}<Kbd keys="⌘5" />{/if}</a><ReviewShortcut goTo={goToTab} />
         <a class="tab" class:active={tab === "actions"} href="#/pr/{repo}/{number}/actions" onclick={(event) => guardTabNavigation(event, "actions")}>
           Actions {#if tab !== "actions"}<Kbd keys="⌘4" />{/if}
         </a>
+        <a class="tab" class:active={tab === "review"} href="#/pr/{repo}/{number}/review" onclick={(event) => guardTabNavigation(event, "review")}>Review {#if tab !== "review"}<Kbd keys="⌘5" />{/if}</a><ReviewShortcut goTo={goToTab} />
       </nav>
 
       {#if tab === "actions"}

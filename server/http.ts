@@ -114,7 +114,8 @@ import {
   listFixerAgents,
   type AgentRow,
 } from "./agents.ts";
-import { askReview, currentPrHead, reviewAgentRunning } from "./reviewAgent.ts";
+import { currentPrHead, enqueueReview, reviewActivity } from "./reviewAgent.ts";
+import { REVIEW_EFFORTS, REVIEW_MODEL_CHOICES, reviewConfig, writeReviewConfig } from "./reviewConfig.ts";
 import { readReviewMeta, readTranscript, resolveReviewFile, reviewContentType, reviewDir, REVIEW_HTML } from "./reviews.ts";
 import { checkForUpdate, isUpdateAvailable, runningRev, updatesEnabled } from "./version.ts";
 import { spawn } from "node:child_process";
@@ -2815,6 +2816,7 @@ async function handleReviewState(repo: string, number: number): Promise<Response
   const meta = await readReviewMeta(repo, number);
   const htmlExists = await Bun.file(`${dir}/${REVIEW_HTML}`).exists();
   const headSha = currentPrHead(repo, number);
+  const activity = await reviewActivity(repo, number);
   return json({
     turns: await readTranscript(repo, number),
     htmlExists,
@@ -2823,8 +2825,13 @@ async function handleReviewState(repo: string, number: number): Promise<Response
     htmlUpdatedAt: meta.htmlUpdatedAt,
     // only a materialized HTML page can be stale; an empty tab is not
     stale: Boolean(htmlExists && headSha && meta.htmlHeadSha && meta.htmlHeadSha !== headSha),
-    model: meta.model,
-    running: reviewAgentRunning(repo, number),
+    running: activity.running,
+    startedAt: activity.startedAt,
+    queued: activity.queued,
+    // the live harness event stream for the message being answered right now
+    agentTurns: activity.turns,
+    config: reviewConfig(),
+    lastModel: meta.model,
   });
 }
 
@@ -2838,11 +2845,23 @@ async function handleReviewAsk(repo: string, number: number, req: Request): Prom
   const message = body && typeof body === "object" && "message" in body ? body.message : null;
   if (typeof message !== "string" || message.trim() === "") return json({ error: "message is required" }, 400);
   try {
-    return json({ answer: await askReview(repo, number, message.trim()) });
+    // returns once the message is durably queued; the answer arrives in the transcript later
+    return json({ queued: await enqueueReview(repo, number, message.trim()) }, 202);
   } catch (err) {
-    const text = err instanceof Error ? err.message : String(err);
-    return json({ error: text }, /already answering/.test(text) ? 409 : 502);
+    return json({ error: err instanceof Error ? err.message : String(err) }, 502);
   }
+}
+
+async function handleReviewConfig(req: Request): Promise<Response> {
+  if (req.method === "GET") return json({ ...reviewConfig(), models: REVIEW_MODEL_CHOICES, efforts: REVIEW_EFFORTS });
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch {
+    return json({ error: "invalid JSON body" }, 400);
+  }
+  const patch = (body ?? {}) as { model?: unknown; effort?: unknown };
+  return json({ ...writeReviewConfig(patch), models: REVIEW_MODEL_CHOICES, efforts: REVIEW_EFFORTS });
 }
 
 async function handleReviewFile(repo: string, number: number, rest: string): Promise<Response> {
@@ -3163,6 +3182,13 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
       const detail = await agentRunDetail(id);
       if (!detail) return json({ error: "no such run" }, 404);
       return json(detail);
+    }
+    // global, not per PR: "/review/config" and its "/api"-prefixed twin
+    if (
+      (parts.length === 2 && parts[0] === "review" && parts[1] === "config") ||
+      (parts.length === 3 && parts[0] === "api" && parts[1] === "review" && parts[2] === "config")
+    ) {
+      if (req.method === "GET" || req.method === "PUT") return handleReviewConfig(req);
     }
     const review = reviewRoute(parts);
     if (review) {

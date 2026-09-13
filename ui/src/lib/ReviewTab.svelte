@@ -1,9 +1,12 @@
 <script>
   import Kbd from "./Kbd.svelte";
-  import { askReview, fetchReviewState } from "./api.js";
+  import ReviewTurns from "./ReviewTurns.svelte";
+  import { askReview, fetchReviewConfig, fetchReviewState, saveReviewConfig } from "./api.js";
   import { renderMarkdown } from "./markdown.js";
   import { relativeTime } from "./time.js";
+  import { elapsedText } from "./agentTurns.js";
   import { REVIEW_PROMPTS } from "./reviewPrompts.js";
+  import { theme } from "./theme.svelte.js";
 
   let { repo, number } = $props();
 
@@ -11,20 +14,28 @@
   const BOTTOM_GUTTER = 34;
 
   let state = $state(null);
+  let config = $state(null);
   let loadError = $state(null);
   let draft = $state("");
-  let sending = $state(false);
   let sendError = $state(null);
   let input = $state(null);
   let log = $state(null);
   let root = $state(null);
-  let height = $state(null);
+  let available = $state(null);
+  let frame = $state(null);
+  let showProgress = $state(false);
+  let configOpen = $state(false);
+  let now = $state(Date.now());
 
   let turns = $derived(state?.turns ?? []);
-  let busy = $derived(sending || state?.running === true);
-  // cache-busted so a rewritten page is actually re-fetched rather than served from the iframe's memory
+  let queued = $derived(state?.queued ?? []);
+  let running = $derived(state?.running === true);
+  let busy = $derived(running || queued.length > 0);
+  // cache-busted so a rewritten page is actually re-fetched, and themed so it follows cockpit
   let htmlSrc = $derived(
-    state?.htmlExists ? `/review/${repo}/${number}/index.html?v=${encodeURIComponent(state.htmlUpdatedAt ?? "")}` : null,
+    state?.htmlExists
+      ? `/review/${repo}/${number}/index.html?theme=${theme.name}&v=${encodeURIComponent(state.htmlUpdatedAt ?? "")}`
+      : null,
   );
 
   async function load() {
@@ -40,27 +51,31 @@
     repo;
     number;
     load();
+    fetchReviewConfig().then((next) => (config = next), () => {});
   });
 
-  // while the agent is working the answer lands in the transcript server-side, so polling is what
-  // shows it - including when this tab was closed and reopened part-way through a long answer
+  // the answer lands in the transcript server-side, so polling is what shows it - including when this
+  // tab was closed, or the window reopened, part-way through a long answer
   $effect(() => {
-    if (!busy) return;
-    const timer = setInterval(load, 2000);
+    const timer = setInterval(load, busy ? 2000 : 15000);
     return () => clearInterval(timer);
   });
 
-  // The surrounding PR view flows with the page, but chat and the map each need their own scrollbar,
-  // so this tab claims the rest of the viewport. Measured rather than hard-coded: the header and tab
-  // bar above it change height with the PR, and PrDetail.svelte is not ours to restructure.
+  $effect(() => {
+    if (!running) return;
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+
+  // Available height, measured rather than hard-coded: the header and tab bar above vary with the PR,
+  // and PrDetail.svelte is not ours to restructure. Re-measures until it converges, because sizing
+  // this tab is itself what removes the page scroll that shifted the measurement.
   $effect(() => {
     if (!root) return;
-    // re-measures until it converges: the first pass runs before the header above has settled, and
-    // sizing this tab is itself what removes the page scroll that shifted the measurement
     const fit = () => {
       const top = root.getBoundingClientRect().top + window.scrollY;
-      const next = Math.max(360, document.documentElement.clientHeight - top - BOTTOM_GUTTER);
-      if (height === null || Math.abs(next - height) > 1) height = next;
+      const next = Math.max(320, document.documentElement.clientHeight - top - BOTTOM_GUTTER);
+      if (available === null || Math.abs(next - available) > 1) available = next;
     };
     fit();
     const observer = new ResizeObserver(fit);
@@ -77,25 +92,28 @@
   // keep the newest turn in view as the conversation grows
   $effect(() => {
     turns.length;
-    busy;
+    queued.length;
+    running;
     if (log) log.scrollTop = log.scrollHeight;
+  });
+
+  // the iframe is sandboxed without same-origin, so the theme travels as a message, not a DOM write
+  $effect(() => {
+    const next = theme.name;
+    frame?.contentWindow?.postMessage({ type: "cockpit-theme", theme: next }, "*");
   });
 
   async function send(message) {
     const text = message.trim();
-    if (!text || sending) return;
-    sending = true;
+    if (!text) return;
     sendError = null;
     draft = "";
-    await load();
     try {
       await askReview(repo, number, text);
     } catch (err) {
       sendError = err.message;
-    } finally {
-      sending = false;
-      await load();
     }
+    await load();
   }
 
   function onKey(event) {
@@ -105,24 +123,31 @@
     }
   }
 
-  function usePrompt(prompt) {
-    draft = prompt.message;
-    input?.focus();
-    send(prompt.message);
+  async function setConfig(patch) {
+    try {
+      config = await saveReviewConfig(patch);
+      await load();
+    } catch (err) {
+      sendError = err.message;
+    }
   }
+
+  let modelLabel = $derived(
+    config?.models?.find((m) => m.id === config.model)?.label ?? config?.model ?? "",
+  );
 </script>
 
 <div
   class="review-layout"
   class:with-html={!!htmlSrc}
   bind:this={root}
-  style:height={height === null ? null : `${height}px`}
+  style:--available={available === null ? null : `${available}px`}
 >
   <section class="chat">
     <div class="chat-log" bind:this={log}>
       {#if loadError}
         <div class="review-empty">Couldn’t load this review: {loadError}</div>
-      {:else if turns.length === 0}
+      {:else if turns.length === 0 && !busy}
         <div class="review-empty">
           Ask about this PR — the diff, or any code around it. The agent reads the whole repository at the PR head.
         </div>
@@ -136,9 +161,32 @@
           <div class="md">{@html renderMarkdown(turn.text)}</div>
         </article>
       {/each}
-      {#if busy}
-        <div class="thinking">Reading the repository…</div>
+
+      {#if running}
+        <div class="progress">
+          <header>
+            <span class="who">Review agent</span>
+            <span class="when">working · {elapsedText(state.startedAt, now)}</span>
+            <button class="link" onclick={() => (showProgress = !showProgress)}>
+              {showProgress ? "collapse" : "all steps"}
+            </button>
+          </header>
+          {#if (state.agentTurns ?? []).length === 0}
+            <div class="thinking">Starting up…</div>
+          {/if}
+          <ReviewTurns turns={state.agentTurns ?? []} expanded={showProgress} />
+        </div>
       {/if}
+
+      {#each queued as message, i (i)}
+        <article class="turn user queued">
+          <header>
+            <span class="who">You</span>
+            <span class="when">queued</span>
+          </header>
+          <div class="md"><p>{message}</p></div>
+        </article>
+      {/each}
     </div>
 
     {#if sendError}<div class="send-error">{sendError}</div>{/if}
@@ -146,20 +194,42 @@
     <div class="composer">
       <div class="prompt-templates">
         {#each REVIEW_PROMPTS as prompt (prompt.label)}
-          <button class="template" disabled={busy} onclick={() => usePrompt(prompt)}>{prompt.label}</button>
+          <button class="template" onclick={() => send(prompt.message)}>{prompt.label}</button>
         {/each}
       </div>
-      <textarea
-        bind:this={input}
-        bind:value={draft}
-        onkeydown={onKey}
-        rows="3"
-        placeholder="Ask about this PR…"
-      ></textarea>
+      <textarea bind:this={input} bind:value={draft} onkeydown={onKey} rows="3" placeholder="Ask about this PR…"></textarea>
       <div class="composer-actions">
-        {#if state?.model}<span class="composer-hint">{state.model}</span>{/if}
-        <button class="send" disabled={busy || !draft.trim()} onclick={() => send(draft)}>
-          {busy ? "Thinking…" : "Send"} {#if !busy && draft.trim()}<Kbd keys={["cmd", "enter"]} />{/if}
+        {#if config}
+          <div class="config">
+            <button class="link config-toggle" onclick={() => (configOpen = !configOpen)}>
+              {modelLabel} · {config.effort}
+            </button>
+            {#if configOpen}
+              <div class="config-menu">
+                <label>
+                  Model
+                  <select value={config.model} onchange={(e) => setConfig({ model: e.currentTarget.value })}>
+                    {#each config.models ?? [] as choice (choice.id)}
+                      <option value={choice.id}>{choice.label}</option>
+                    {/each}
+                  </select>
+                </label>
+                <label>
+                  Thinking
+                  <select value={config.effort} onchange={(e) => setConfig({ effort: e.currentTarget.value })}>
+                    {#each config.efforts ?? [] as level (level)}
+                      <option value={level}>{level}</option>
+                    {/each}
+                  </select>
+                </label>
+                <p class="config-note">Applies to the next message. Both are shared across every PR.</p>
+              </div>
+            {/if}
+          </div>
+        {/if}
+        {#if queued.length > 0}<span class="composer-hint">{queued.length} queued</span>{/if}
+        <button class="send" disabled={!draft.trim()} onclick={() => send(draft)}>
+          Send {#if draft.trim()}<Kbd keys={["cmd", "enter"]} />{/if}
         </button>
       </div>
     </div>
@@ -176,18 +246,28 @@
         {/if}
         <a class="html-open" href={htmlSrc} target="_blank" rel="noopener">open</a>
       </header>
-      <iframe src={htmlSrc} sandbox="allow-scripts" title="Review overview for {repo}#{number}"></iframe>
+      <iframe bind:this={frame} src={htmlSrc} sandbox="allow-scripts" title="Review overview for {repo}#{number}"></iframe>
     </section>
   {/if}
 </div>
 
 <style>
+  /* Two modes. With a map, both panes fill the viewport and each scrolls on its own. Without one,
+     the chat sizes to its content so the composer sits directly under the last message instead of
+     being pushed to the bottom of an empty column. */
   .review-layout {
     display: flex;
     gap: 12px;
     align-items: stretch;
-    /* until the measuring effect runs, a sane height rather than a collapsed or runaway one */
-    height: 70vh;
+    max-height: var(--available, 70vh);
+    min-height: 0;
+  }
+
+  .review-layout.with-html {
+    height: var(--available, 70vh);
+  }
+
+  .review-layout > :global(*) {
     min-height: 0;
   }
 
@@ -199,20 +279,15 @@
     flex: 1;
   }
 
-  .review-layout > * {
-    min-height: 0;
-  }
-
-  /* the chat stays the primary surface; the map gets the extra room only once it exists */
   .review-layout.with-html .chat {
     flex: 0 0 min(46%, 560px);
   }
 
   .chat-log {
-    flex: 1;
+    flex: 0 1 auto;
     min-height: 0;
     overflow-y: auto;
-    padding: 4px 2px 12px;
+    padding: 2px 2px 10px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -221,12 +296,13 @@
   .review-empty {
     color: var(--text-faint);
     font-size: 13px;
-    padding: 18px 2px;
-    max-width: 46ch;
+    padding: 2px 2px 6px;
+    max-width: 52ch;
     line-height: 1.5;
   }
 
-  .turn header {
+  .turn header,
+  .progress header {
     display: flex;
     gap: 8px;
     align-items: baseline;
@@ -248,6 +324,10 @@
     border-left: 2px solid var(--border-hover);
     padding-left: 10px;
     color: var(--text-dim);
+  }
+
+  .turn.queued {
+    opacity: 0.6;
   }
 
   .md {
@@ -277,13 +357,13 @@
     margin-bottom: 0;
   }
 
-  .thinking {
+  .thinking,
+  .send-error {
     font-size: 12px;
     color: var(--text-faint);
   }
 
   .send-error {
-    font-size: 12px;
     color: var(--native-red);
     padding: 6px 2px;
   }
@@ -313,14 +393,9 @@
     cursor: pointer;
   }
 
-  .template:hover:not(:disabled) {
+  .template:hover {
     background: var(--surface-hover);
     color: var(--text);
-  }
-
-  .template:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 
   textarea {
@@ -350,6 +425,57 @@
   .composer-hint {
     font-size: 11px;
     color: var(--text-faint);
+  }
+
+  .config {
+    position: relative;
+    margin-right: auto;
+  }
+
+  .config-toggle {
+    font-size: 11px;
+    color: var(--text-faint);
+  }
+
+  .config-menu {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px;
+    width: 250px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: var(--shadow-surface);
+  }
+
+  .config-menu label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-dim);
+  }
+
+  .config-menu select {
+    font: inherit;
+    font-size: 12px;
+    padding: 4px 6px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--text);
+  }
+
+  .config-note {
+    margin: 0;
+    font-size: 11px;
+    color: var(--text-faint);
+    line-height: 1.4;
   }
 
   .send {
@@ -408,12 +534,15 @@
     min-height: 0;
     width: 100%;
     border: 0;
-    background: #0d0d0f;
+    background: var(--panel);
   }
 
   @media (max-width: 900px) {
-    .review-layout {
+    .review-layout,
+    .review-layout.with-html {
       flex-direction: column;
+      height: auto;
+      max-height: none;
     }
 
     .review-layout.with-html .chat {

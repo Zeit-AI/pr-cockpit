@@ -518,6 +518,7 @@ export async function fetchReviewState(repo, number) {
   return body;
 }
 
+// returns as soon as the message is queued; the answer arrives in a later state poll
 export async function askReview(repo, number, message) {
   const res = await fetch(`/api/review/${repo}/${number}/ask`, {
     method: "POST",
@@ -526,5 +527,23 @@ export async function askReview(repo, number, message) {
   });
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error || `review ask ${res.status}`);
+  return body;
+}
+
+export async function fetchReviewConfig() {
+  const res = await fetch("/api/review/config");
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error || `review config ${res.status}`);
+  return body;
+}
+
+export async function saveReviewConfig(patch) {
+  const res = await fetch("/api/review/config", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error || `review config ${res.status}`);
   return body;
 }

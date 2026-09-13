@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync } from "node:fs";
 import path from "node:path";
 
 // Per-PR review companion storage. Deliberately a sibling of mirrors/worktrees/agents rather than a
@@ -41,10 +41,14 @@ export interface ReviewMeta {
   htmlHeadSha: string | null;
   htmlUpdatedAt: string | null;
   model: string | null;
+  effort: string | null;
   createdAt: string | null;
   updatedAt: string | null;
   // set only after a harness run exits cleanly, so --continue is never used before a session exists
   sessionStarted: boolean;
+  // queued reviewer messages, oldest first; the head is the one running. On disk rather than in
+  // memory so a restart resumes the queue instead of silently dropping unanswered questions.
+  pending: string[];
 }
 
 const EMPTY_META: ReviewMeta = {
@@ -52,16 +56,21 @@ const EMPTY_META: ReviewMeta = {
   htmlHeadSha: null,
   htmlUpdatedAt: null,
   model: null,
+  effort: null,
   createdAt: null,
   updatedAt: null,
   sessionStarted: false,
+  pending: [],
 };
 
 export async function readReviewMeta(repo: string, number: number): Promise<ReviewMeta> {
   const file = Bun.file(`${reviewDir(repo, number)}/${REVIEW_META}`);
   if (!(await file.exists())) return { ...EMPTY_META };
   try {
-    return { ...EMPTY_META, ...(await file.json()) as Partial<ReviewMeta> };
+    const stored = { ...EMPTY_META, ...(await file.json()) as Partial<ReviewMeta> };
+    // a hand-edited or older meta.json must not hand a non-array to the queue drain
+    if (!Array.isArray(stored.pending)) stored.pending = [];
+    return stored;
   } catch {
     return { ...EMPTY_META };
   }
@@ -85,6 +94,15 @@ export interface ReviewTurn {
 // Invisible-in-markdown turn markers: transcript.md stays readable on its own, and the UI still gets
 // an unambiguous split. The agent never writes this file - the server appends both sides of the chat.
 const TURN_MARKER = /^<!-- turn:(user|agent) ([^\s>]+) -->$/;
+
+// A queued message is transcribed when its run starts, not when it is queued, so questions and answers
+// stay paired in reading order. A run interrupted by a restart already transcribed its question, so
+// skip an identical repeat rather than showing it twice when the queue resumes.
+export async function appendReviewTurnOnce(repo: string, number: number, role: ReviewRole, text: string): Promise<void> {
+  const last = (await readTranscript(repo, number)).at(-1);
+  if (last?.role === role && last.text === text.trim()) return;
+  await appendReviewTurn(repo, number, role, text);
+}
 
 export async function appendReviewTurn(repo: string, number: number, role: ReviewRole, text: string): Promise<void> {
   const path = `${reviewDir(repo, number)}/${REVIEW_TRANSCRIPT}`;
@@ -116,6 +134,32 @@ export function parseTranscript(markdown: string): ReviewTurn[] {
 export async function readTranscript(repo: string, number: number): Promise<ReviewTurn[]> {
   const file = Bun.file(`${reviewDir(repo, number)}/${REVIEW_TRANSCRIPT}`);
   return (await file.exists()) ? parseTranscript(await file.text()) : [];
+}
+
+// every PR with a review directory, for picking queues back up after a restart
+export function listReviewPrs(): Array<{ repo: string; number: number }> {
+  const found: Array<{ repo: string; number: number }> = [];
+  let repoDirs: string[];
+  try {
+    repoDirs = readdirSync(reviewsRoot());
+  } catch {
+    return found;
+  }
+  for (const repoDir of repoDirs) {
+    if (!repoDir.includes("__")) continue;
+    const repo = repoDir.replace("__", "/");
+    let prDirs: string[];
+    try {
+      prDirs = readdirSync(`${reviewsRoot()}/${repoDir}`);
+    } catch {
+      continue;
+    }
+    for (const prDir of prDirs) {
+      const number = Number(prDir.startsWith("pr-") ? prDir.slice(3) : NaN);
+      if (Number.isInteger(number) && number > 0) found.push({ repo, number });
+    }
+  }
+  return found;
 }
 
 const CONTENT_TYPES: Record<string, string> = {
