@@ -36,30 +36,49 @@ Everything else is upstream behaviour and upstream documentation.
 Run this in your terminal as your normal user, **not with `sudo`**:
 
 ```sh
-git clone git@github.com:Zeit-AI/pr-cockpit.git ~/code/pr-cockpit
-cd ~/code/pr-cockpit
-scripts/install
+curl -fsSL https://raw.githubusercontent.com/Zeit-AI/pr-cockpit/main/scripts/bootstrap | bash
 ```
 
-`scripts/install` reconciles everything: dependencies, the desktop app, the `pr-cockpit` CLI, and the launch agent. The installed app runs from whichever checkout you installed it from, so keep the clone where you want it to live.
+That is the whole install. It checks prerequisites, clones this fork to `~/.pr-cockpit`, installs the desktop app and the `pr-cockpit` CLI, and opens setup. Sign in with your GitHub account when it asks — Cockpit reuses your `gh` login. Rerun the same command any time to update.
 
-If you already had upstream Cockpit installed, the installer stops at the last stage with `port 4820 is already serving another app` — the old install's server still holds the port. Unload both of its launch agents and run the installer again:
+Open the app from Spotlight afterwards. Do not run the upstream install command further down this README; it installs `theolundqvist/pr-cockpit` and you will not get the Review tab.
+
+<details>
+<summary>If you already have upstream PR Cockpit installed</summary>
+
+The installer stops at its last stage with `port 4820 is already serving another app`, because the old install's server still holds the port. Unload both of its launch agents, then rerun:
 
 ```sh
 launchctl bootout gui/$(id -u)/app.pr-cockpit.server
 launchctl bootout gui/$(id -u)/app.pr-cockpit
-scripts/install
-curl -fsS http://127.0.0.1:4820/healthz    # "root" should be your checkout
+curl -fsSL https://raw.githubusercontent.com/Zeit-AI/pr-cockpit/main/scripts/bootstrap | bash
 ```
 
-Rerun the installer rather than reloading the agents by hand. It rewrites both plists and bootstraps both jobs; doing only the server leaves the app registration pointing at the old checkout, and because Spotlight opens a stub that hands off to that registration, the app keeps relaunching the old binary no matter how often you quit it. `launchctl kickstart -k` never helps here either: a loaded job keeps the environment it was bootstrapped with, so the rewritten plist is ignored until the job is booted out and bootstrapped again.
+Rerun the installer rather than reloading the agents by hand. It rewrites both launch agents and restarts both jobs; doing only the server leaves the app registration pointing at the old checkout, and since the Applications icon is a stub that hands off to that registration, the app keeps relaunching the old build however often you quit it. `launchctl kickstart -k` does not help either: a loaded job keeps the environment it was bootstrapped with, so a rewritten plist is ignored until the job is booted out and bootstrapped again.
 
-To check which build is actually running:
+To confirm which build is running:
 
 ```sh
 launchctl print gui/$(id -u)/app.pr-cockpit | grep COCKPIT_ROOT
 ps -eo command | grep "PR Cockpit.app/Contents/MacOS"
 ```
+
+</details>
+
+<details>
+<summary>Working on Cockpit itself</summary>
+
+To keep the checkout somewhere you edit it, clone it yourself and install from there — the installed app runs from whichever checkout it was installed from:
+
+```sh
+git clone git@github.com:Zeit-AI/pr-cockpit.git ~/code/pr-cockpit
+cd ~/code/pr-cockpit
+scripts/install
+```
+
+Update that install with `scripts/update` from the checkout, not the bootstrap command — bootstrap always installs `~/.pr-cockpit` and would repoint the app away from your clone.
+
+</details>
 
 ### Updating
 

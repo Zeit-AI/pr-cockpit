@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 if [[ "$(/usr/bin/id -u)" == "0" ]]; then echo "pr-cockpit: must not run as root" >&2; exit 1; fi
 # One-command installer, safe to rerun as the upgrade path:
-#   curl -fsSL https://raw.githubusercontent.com/theolundqvist/pr-cockpit/main/scripts/bootstrap | bash
+#   curl -fsSL https://raw.githubusercontent.com/Zeit-AI/pr-cockpit/main/scripts/bootstrap | bash
 set -euo pipefail
 umask 077
 
-repo_slug="theolundqvist/pr-cockpit"
+# Zeit AI's fork. A fork's bootstrap must install the fork: this is the one line that has to differ
+# from upstream, and a conflict here on a merge is the signal to check it still points at us.
+repo_slug="Zeit-AI/pr-cockpit"
 repo_url="https://github.com/$repo_slug.git"
 target="${COCKPIT_HOME:-$HOME/.pr-cockpit}"
 dry_run="${COCKPIT_BOOTSTRAP_DRY_RUN:-0}"
