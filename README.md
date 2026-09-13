@@ -43,15 +43,23 @@ scripts/install
 
 `scripts/install` reconciles everything: dependencies, the desktop app, the `pr-cockpit` CLI, and the launch agent. The installed app runs from whichever checkout you installed it from, so keep the clone where you want it to live.
 
-If the installer stops with `port 4820 is already serving another app`, an older Cockpit is still running. Point the launch agent at this checkout and restart it:
+If you already had upstream Cockpit installed, the installer stops at the last stage with `port 4820 is already serving another app` — the old install's server still holds the port. Unload both of its launch agents and run the installer again:
 
 ```sh
 launchctl bootout gui/$(id -u)/app.pr-cockpit.server
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/app.pr-cockpit.server.plist
+launchctl bootout gui/$(id -u)/app.pr-cockpit
+scripts/install
 curl -fsS http://127.0.0.1:4820/healthz    # "root" should be your checkout
 ```
 
-`launchctl kickstart -k` is not enough on its own — launchd keeps the old plist until you bootstrap it again.
+Rerun the installer rather than reloading the agents by hand. It rewrites both plists and bootstraps both jobs; doing only the server leaves the app registration pointing at the old checkout, and because Spotlight opens a stub that hands off to that registration, the app keeps relaunching the old binary no matter how often you quit it. `launchctl kickstart -k` never helps here either: a loaded job keeps the environment it was bootstrapped with, so the rewritten plist is ignored until the job is booted out and bootstrapped again.
+
+To check which build is actually running:
+
+```sh
+launchctl print gui/$(id -u)/app.pr-cockpit | grep COCKPIT_ROOT
+ps -eo command | grep "PR Cockpit.app/Contents/MacOS"
+```
 
 ### Updating
 
