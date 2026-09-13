@@ -38,7 +38,7 @@ function stubbedPath(dir: string, platform: "Darwin" | "Linux" = "Darwin", ghExi
     `if [[ "\${1:-}" == "-C" && "\${3:-}" == "rev-parse" ]]; then
   cd "$2" && pwd -P
 elif [[ "\${1:-}" == "-C" && "\${3:-}" == "remote" ]]; then
-  printf "https://github.com/theolundqvist/pr-cockpit.git\\n"
+  printf "https://github.com/Zeit-AI/pr-cockpit.git\\n"
 fi`,
   );
   executable(join(bin, "bun"), "exit 0");
