@@ -51,7 +51,7 @@
     repo;
     number;
     load();
-    fetchReviewConfig().then((next) => (config = next), () => {});
+    fetchReviewConfig(repo).then((next) => (config = next), () => {});
   });
 
   // the answer lands in the transcript server-side, so polling is what shows it - including when this
@@ -125,11 +125,20 @@
 
   async function setConfig(patch) {
     try {
-      config = await saveReviewConfig(patch);
+      config = await saveReviewConfig(repo, patch);
       await load();
     } catch (err) {
       sendError = err.message;
     }
+  }
+
+  let notesDraft = $state(null);
+  let notesSaved = $state(false);
+
+  async function saveNotes() {
+    await setConfig({ notes: notesDraft ?? "" });
+    notesSaved = true;
+    setTimeout(() => (notesSaved = false), 1500);
   }
 
   let modelLabel = $derived(
@@ -222,7 +231,20 @@
                     {/each}
                   </select>
                 </label>
-                <p class="config-note">Applies to the next message. Both are shared across every PR.</p>
+                <label>
+                  Notes for {repo}
+                  <textarea
+                    class="notes"
+                    rows="6"
+                    placeholder="Standing context for this repository — subsystem names, where the seams are, what a reviewer here always has to check."
+                    value={notesDraft ?? config.notes ?? ""}
+                    oninput={(e) => (notesDraft = e.currentTarget.value)}
+                  ></textarea>
+                </label>
+                <div class="config-row">
+                  <p class="config-note">Model and effort are shared; notes belong to this repository. Applied to the next message.</p>
+                  <button class="link" onclick={saveNotes}>{notesSaved ? "saved" : "save"}</button>
+                </div>
               </div>
             {/if}
           </div>
@@ -446,7 +468,8 @@
     flex-direction: column;
     gap: 8px;
     padding: 10px;
-    width: 250px;
+    width: 340px;
+    max-width: calc(100vw - 32px);
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -471,8 +494,20 @@
     color: var(--text);
   }
 
+  .config-row {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .notes {
+    font-size: 12px;
+    line-height: 1.45;
+  }
+
   .config-note {
     margin: 0;
+    flex: 1;
     font-size: 11px;
     color: var(--text-faint);
     line-height: 1.4;

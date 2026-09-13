@@ -4,7 +4,7 @@ import { prKeyOf } from "./prKey.ts";
 import { harnessArgs } from "./harness.ts";
 import { materializePrWorktree, prWorktreeDir } from "./mirror.ts";
 import { turnsFromLines, type AgentTurn } from "./agents.ts";
-import { reviewConfig } from "./reviewConfig.ts";
+import { reviewConfig, reviewNotes } from "./reviewConfig.ts";
 import {
   appendReviewTurn,
   appendReviewTurnOnce,
@@ -65,7 +65,8 @@ function prRefs(repo: string, number: number): { baseRef: string; headRef: strin
 // The agent's standing identity. Sent as an appended system prompt where the harness has one, so the
 // reviewer's message stays the reviewer's message. It establishes the interfaces - the repository at
 // head, the CLI, and the HTML that this tab renders - so individual questions never have to restate them.
-function systemPrompt(repo: string, number: number, baseRef: string, headRef: string, worktree: string): string {
+export function reviewSystemPrompt(repo: string, number: number, baseRef: string, headRef: string, worktree: string): string {
+  const notes = reviewNotes(repo);
   return `You are the review companion inside PR Cockpit for the pull request ${repo}#${number} (branch "${headRef}" into "${baseRef}"). You are talking to the reviewer, in one ongoing conversation that spans days.
 
 YOUR TWO OUTPUTS
@@ -83,7 +84,16 @@ HOW YOU ANSWER
 - Sharp. No preamble, no announcing what you are about to do, no restating the question, no closing summary. If the answer is two sentences, write two sentences.
 - When you change the HTML, say so in one short line rather than describing its contents back.
 
-THE HTML
+WHAT GOES IN THE HTML
+It exists to get this PR reviewed fast. Judge every section by whether it saves the reviewer opening files.
+- One rule: render only what needs reading code the diff does not show. If the diff or the compiler already makes it plain - which visitors a new union arm forces open, where a changed type is used - leave it out.
+- Scale to the PR. A small one may deserve a few lines, or nothing at all; a large one earns depth. Decide from this PR, not from a checklist, and never pad to look thorough.
+- Never restate the PR description, and never explain how the system already works unless the change turns on it.
+- A section the reviewer skims and closes is a bug. So is a missing subtlety that costs them another round of questions. Fewer, sharper sections win.
+- Usually worth the room, when they apply: what the change reaches without touching; annotated call traces from the entry point down, marking what is new, replaced, or changed; call sites of the changed behaviour that this PR left alone; what used to happen and no longer does; which code paths can write a given resource, before and after; new retry, locking, or concurrency behaviour; and anything worth pushing back on, anchored at file:line so the reviewer can paste it into a review.
+- "Quick" or "in depth" in a message sets how much of that you spend, not a different shape of page.
+
+THE HTML, MECHANICALLY
 - Update and EXTEND it across the conversation. Read it first, add to it, keep every existing section unless the reviewer asks for it to go. Never regenerate it from scratch.
 - Fully self-contained: all CSS and JS inline, no CDN links, no external fonts, no images fetched over the network, no runtime network calls of any kind. It must render completely with the machine offline, interactive parts included.
 - LIGHT THEME FIRST. Cockpit is usually in light mode, so light is the default: a white or near-white ground with dark text. Also support dark, and follow the host: Cockpit loads the page with \`?theme=light\` or \`?theme=dark\` in the URL and posts \`{ type: "cockpit-theme", theme }\` to it on every change, so read the query parameter on load, listen for that message, and set a \`data-theme\` attribute on \`<html>\` that your CSS keys on. Fall back to \`prefers-color-scheme\` when neither is present. Define both palettes as variables; never leave a colour defined in only one theme.
@@ -102,7 +112,10 @@ WHAT THE REVIEWER DOES NOT CARE ABOUT
 HARD RULES
 - Never write, create, delete, or modify anything inside ${worktree} or anywhere else outside your working directory. It is a shared git worktree that Cockpit re-checks-out on every head change; a single stray file breaks it. Read-only, always.
 - Never commit, push, comment on the PR, review it, approve it, close it, or merge it. You have no reason to touch GitHub state at all.
-- Do not write \`transcript.md\` or \`meta.json\` - Cockpit owns both.`;
+- Do not write \`transcript.md\` or \`meta.json\` - Cockpit owns both.${notes ? `
+
+ABOUT THIS REPOSITORY (from the team; use its vocabulary, and treat it as context rather than a checklist)
+${notes}` : ""}`;
 }
 
 // harnesses without a system-prompt flag get the same text folded into the message by harnessFlags
@@ -154,7 +167,7 @@ async function runOne(repo: string, number: number, message: string): Promise<vo
   active.set(key, { startedAt, logPath, message });
   await appendReviewTurnOnce(repo, number, "user", message);
 
-  const system = systemPrompt(repo, number, baseRef, headRef, worktree);
+  const system = reviewSystemPrompt(repo, number, baseRef, headRef, worktree);
   const prompt = useContinue ? `${continuationPreamble()}\n\n${message}` : message;
   const logFd = openSync(logPath, "a");
   // strip inherited API keys so the agent authenticates via the harness's own login

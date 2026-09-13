@@ -2830,7 +2830,7 @@ async function handleReviewState(repo: string, number: number): Promise<Response
     queued: activity.queued,
     // the live harness event stream for the message being answered right now
     agentTurns: activity.turns,
-    config: reviewConfig(),
+    config: reviewConfig(repo),
     lastModel: meta.model,
   });
 }
@@ -2852,16 +2852,21 @@ async function handleReviewAsk(repo: string, number: number, req: Request): Prom
   }
 }
 
-async function handleReviewConfig(req: Request): Promise<Response> {
-  if (req.method === "GET") return json({ ...reviewConfig(), models: REVIEW_MODEL_CHOICES, efforts: REVIEW_EFFORTS });
+// model and effort are global; notes belong to the repo named in ?repo=, so a team's vocabulary for one
+// codebase never leaks into reviews of another
+async function handleReviewConfig(req: Request, url: URL): Promise<Response> {
+  const repo = url.searchParams.get("repo") ?? "";
+  if (repo !== "" && !/^[^/]+\/[^/]+$/.test(repo)) return json({ error: "repo must be owner/name" }, 400);
+  const shape = { models: REVIEW_MODEL_CHOICES, efforts: REVIEW_EFFORTS };
+  if (req.method === "GET") return json({ ...reviewConfig(repo), ...shape });
   let body: unknown;
   try {
     body = await req.json();
   } catch {
     return json({ error: "invalid JSON body" }, 400);
   }
-  const patch = (body ?? {}) as { model?: unknown; effort?: unknown };
-  return json({ ...writeReviewConfig(patch), models: REVIEW_MODEL_CHOICES, efforts: REVIEW_EFFORTS });
+  const patch = (body ?? {}) as { model?: unknown; effort?: unknown; notes?: unknown };
+  return json({ ...writeReviewConfig(patch, repo), ...shape });
 }
 
 async function handleReviewFile(repo: string, number: number, rest: string): Promise<Response> {
@@ -3188,7 +3193,7 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
       (parts.length === 2 && parts[0] === "review" && parts[1] === "config") ||
       (parts.length === 3 && parts[0] === "api" && parts[1] === "review" && parts[2] === "config")
     ) {
-      if (req.method === "GET" || req.method === "PUT") return handleReviewConfig(req);
+      if (req.method === "GET" || req.method === "PUT") return handleReviewConfig(req, url);
     }
     const review = reviewRoute(parts);
     if (review) {

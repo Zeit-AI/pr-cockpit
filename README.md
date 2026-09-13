@@ -19,10 +19,11 @@ This is Zeit AI's fork of [`theolundqvist/pr-cockpit`](https://github.com/theolu
 **A Review tab on every PR (<kbd>⌘5</kbd>).** An ongoing chat with an agent that knows the PR *and* the code around it. It reads the whole repository at the PR head, not just the diff, so "why is there a union visitor in `appRouter.ts` that special-cases remote tables?" gets a real answer with file and line references.
 
 - The agent answers in chat and maintains a **visual overview** — a self-contained `index.html` rendered beside the chat. Call graphs, component trees, use-site tables, blast radius, quizzes. It extends that page across the conversation rather than regenerating it.
-- **Prompt buttons** (Overview, Call traces, Blast radius, Quiz) queue a canned message. Nothing special happens server-side; edit `ui/src/lib/reviewPrompts.js` to change them.
+- **The overview is built for the PR, not from a template.** The agent renders only what needs reading code the diff does not show, and scales it to the change — a four-line PR gets a few sections, a large one earns depth. The two prompt buttons (**Quick overview**, **In depth**) signal how much depth you want; picking sections yourself would mean reading the PR first, which is the work being saved. Edit `ui/src/lib/reviewPrompts.js` to change them.
+- **Repository notes.** The control beside the composer holds standing context for the repo you are in — subsystem names, where the seams are, what a reviewer here always has to check. It is appended to the agent's system prompt so a team's vocabulary stays consistent across reviews. Notes are per repository; model and effort are shared.
 - **Messages queue.** Send while the agent is working and it answers them in order. The queue is on disk, so closing the tab or restarting Cockpit does not lose a question.
 - **Live progress** shows the agent's tool calls as they happen, the same turn-by-turn view as the Agents tab.
-- **Model and thinking effort** are set from the control beside the composer. Default: Opus 5 with the 1M-token context window, medium effort.
+- **Model and thinking effort** are set from the same control. Default: Opus 5 with the 1M-token context window, medium effort.
 - The conversation, the HTML, and the queue live in `$COCKPIT_DATA_DIR/reviews/<owner>__<repo>/pr-<N>/` and are never swept. Sessions resume across restarts.
 - The agent is read-only against GitHub and against the PR worktree. It never commits, pushes, comments, reviews, or merges.
 

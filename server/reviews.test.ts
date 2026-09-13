@@ -135,3 +135,26 @@ describe("meta", () => {
     expect((await readReviewMeta("owner/repo", 23)).sessionStarted).toBe(false);
   });
 });
+
+describe("the review agent's system prompt", () => {
+  test("carries the repository's own notes, and nothing when there are none", async () => {
+    const { reviewSystemPrompt } = await import("./reviewAgent.ts");
+    const { writeReviewConfig } = await import("./reviewConfig.ts");
+    const worktree = "/tmp/worktrees/acme__widgets/pr-7";
+
+    const bare = reviewSystemPrompt("acme/widgets", 7, "main", "feature", worktree);
+    expect(bare).not.toContain("ABOUT THIS REPOSITORY");
+    // the interfaces the agent is told it has, so a question never has to restate them
+    expect(bare).toContain(worktree);
+    expect(bare).toContain("pr-cockpit acme/widgets#7");
+    expect(bare).toContain("index.html");
+
+    writeReviewConfig({ notes: "Subsystems: Ingestion 13.7, Branching 3.5." }, "acme/widgets");
+    const withNotes = reviewSystemPrompt("acme/widgets", 7, "main", "feature", worktree);
+    expect(withNotes).toContain("ABOUT THIS REPOSITORY");
+    expect(withNotes).toContain("Subsystems: Ingestion 13.7, Branching 3.5.");
+
+    // another repository's review must not inherit that vocabulary
+    expect(reviewSystemPrompt("other/thing", 1, "main", "feature", worktree)).not.toContain("Ingestion 13.7");
+  });
+});

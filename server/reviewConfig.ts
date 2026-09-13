@@ -31,20 +31,41 @@ export function normalizeReviewEffort(value: unknown): ReviewEffort {
   return REVIEW_EFFORTS.includes(value as ReviewEffort) ? (value as ReviewEffort) : DEFAULT_REVIEW_EFFORT;
 }
 
+// Standing context for one repository, appended to the agent's system prompt verbatim: the vocabulary
+// a team wants used consistently across reviews - subsystem names, where the seams are, what this repo
+// makes the reviewer check. Per repo rather than baked in, because the taxonomy that makes one codebase
+// legible is noise in the next one. Model and effort stay global.
+export const MAX_REVIEW_NOTES = 8000;
+
+export function normalizeReviewNotes(value: unknown): string {
+  return typeof value === "string" ? value.trim().slice(0, MAX_REVIEW_NOTES) : "";
+}
+
+function notesKey(repo: string): string {
+  return `review_notes:${repo}`;
+}
+
+export function reviewNotes(repo: string): string {
+  return normalizeReviewNotes(getSetting(notesKey(repo)));
+}
+
 export interface ReviewConfig {
   model: string;
   effort: ReviewEffort;
+  notes: string;
 }
 
-export function reviewConfig(): ReviewConfig {
+export function reviewConfig(repo = ""): ReviewConfig {
   return {
     model: normalizeReviewModel(getSetting("review_model")),
     effort: normalizeReviewEffort(getSetting("review_effort")),
+    notes: repo ? reviewNotes(repo) : "",
   };
 }
 
-export function writeReviewConfig(patch: { model?: unknown; effort?: unknown }): ReviewConfig {
+export function writeReviewConfig(patch: { model?: unknown; effort?: unknown; notes?: unknown }, repo = ""): ReviewConfig {
   if (patch.model !== undefined) setSetting("review_model", normalizeReviewModel(patch.model));
   if (patch.effort !== undefined) setSetting("review_effort", normalizeReviewEffort(patch.effort));
-  return reviewConfig();
+  if (patch.notes !== undefined && repo) setSetting(notesKey(repo), normalizeReviewNotes(patch.notes));
+  return reviewConfig(repo);
 }

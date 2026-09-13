@@ -2139,7 +2139,7 @@ describe("review routes", () => {
   test("exposes the review model and effort, and rejects nonsense", async () => {
     await withReviewDataDir(async (handler) => {
       const initial = await (await handler(new Request("http://127.0.0.1:4820/review/config"))).json() as { models: Array<{ id: string }> };
-      expect(initial).toMatchObject({ model: "claude-opus-5[1m]", effort: "medium" });
+      expect(initial).toMatchObject({ model: "claude-opus-5[1m]", effort: "medium", notes: "" });
       expect(initial.models.some((m: { id: string }) => m.id === "claude-sonnet-5")).toBe(true);
 
       const saved = await (await handler(new Request("http://127.0.0.1:4820/api/review/config", {
@@ -2156,6 +2156,24 @@ describe("review routes", () => {
         body: JSON.stringify({ model: "rm -rf /", effort: "ludicrous" }),
       }))).json();
       expect(reset).toMatchObject({ model: "claude-opus-5[1m]", effort: "medium" });
+    });
+  });
+
+  test("keeps repository notes with their own repository", async () => {
+    await withReviewDataDir(async (handler) => {
+      const saved = await (await handler(new Request(`http://127.0.0.1:4820/review/config?repo=${repo}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ notes: "Subsystems: Agent Runtime, Ingestion." }),
+      }))).json();
+      expect(saved).toMatchObject({ notes: "Subsystems: Agent Runtime, Ingestion." });
+
+      // a team's vocabulary for one codebase must not show up in reviews of another
+      const other = await (await handler(new Request("http://127.0.0.1:4820/review/config?repo=other/thing"))).json();
+      expect(other).toMatchObject({ notes: "", model: "claude-opus-5[1m]" });
+      const unscoped = await (await handler(new Request("http://127.0.0.1:4820/review/config"))).json();
+      expect(unscoped).toMatchObject({ notes: "" });
+      expect((await handler(new Request("http://127.0.0.1:4820/review/config?repo=nonsense"))).status).toBe(400);
     });
   });
 

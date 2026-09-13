@@ -530,15 +530,15 @@ export async function askReview(repo, number, message) {
   return body;
 }
 
-export async function fetchReviewConfig() {
-  const res = await fetch("/api/review/config");
+export async function fetchReviewConfig(repo) {
+  const res = await fetch(`/api/review/config?repo=${encodeURIComponent(repo)}`);
   const body = await res.json().catch(() => null);
   if (!res.ok) throw new Error(body?.error || `review config ${res.status}`);
   return body;
 }
 
-export async function saveReviewConfig(patch) {
-  const res = await fetch("/api/review/config", {
+export async function saveReviewConfig(repo, patch) {
+  const res = await fetch(`/api/review/config?repo=${encodeURIComponent(repo)}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(patch),
