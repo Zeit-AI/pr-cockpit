@@ -141,6 +141,10 @@ describe("the review agent's system prompt", () => {
     const { reviewSystemPrompt } = await import("./reviewAgent.ts");
     const { writeReviewConfig } = await import("./reviewConfig.ts");
     const worktree = "/tmp/worktrees/acme__widgets/pr-7";
+    // notes live in the settings table, which is the process-wide cockpit db, not this test's scratch
+    // data dir - so establish the empty state rather than assuming it, and hand it back afterwards
+    writeReviewConfig({ notes: "" }, "acme/widgets");
+    writeReviewConfig({ notes: "" }, "other/thing");
 
     const bare = reviewSystemPrompt("acme/widgets", 7, "main", "feature", worktree);
     expect(bare).not.toContain("ABOUT THIS REPOSITORY");
@@ -156,5 +160,7 @@ describe("the review agent's system prompt", () => {
 
     // another repository's review must not inherit that vocabulary
     expect(reviewSystemPrompt("other/thing", 1, "main", "feature", worktree)).not.toContain("Ingestion 13.7");
+
+    writeReviewConfig({ notes: "" }, "acme/widgets");
   });
 });

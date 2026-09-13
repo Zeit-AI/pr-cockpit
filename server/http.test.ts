@@ -2161,6 +2161,14 @@ describe("review routes", () => {
 
   test("keeps repository notes with their own repository", async () => {
     await withReviewDataDir(async (handler) => {
+      // notes live in the process-wide settings table, so leave it as it was found
+      const clear = (target: string) => handler(new Request(`http://127.0.0.1:4820/review/config?repo=${target}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ notes: "" }),
+      }));
+      await clear(repo);
+      await clear("other/thing");
       const saved = await (await handler(new Request(`http://127.0.0.1:4820/review/config?repo=${repo}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
@@ -2174,6 +2182,7 @@ describe("review routes", () => {
       const unscoped = await (await handler(new Request("http://127.0.0.1:4820/review/config"))).json();
       expect(unscoped).toMatchObject({ notes: "" });
       expect((await handler(new Request("http://127.0.0.1:4820/review/config?repo=nonsense"))).status).toBe(400);
+      await clear(repo);
     });
   });
 
