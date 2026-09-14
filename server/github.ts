@@ -1,4 +1,5 @@
 import type { MergeMethod } from "./mergeMethod.ts";
+import { teamReviewRequested } from "./reviewerTeam.ts";
 import { mockGithub, MOCK_FIXTURE_CLOCK } from "./mockGithub.ts";
 import {
   githubAuthStatus as liveGithubAuthStatus,
@@ -1231,7 +1232,7 @@ type PrDetailShape<Rx> = {
   labels: { nodes: Array<{ name: string }> };
   assignees: { nodes: Array<{ login: string }> };
   reviewRequests: {
-    nodes: Array<{ requestedReviewer: { __typename: string; login?: string; avatarUrl?: string; name?: string } | null }>;
+    nodes: Array<{ requestedReviewer: { __typename: string; login?: string; avatarUrl?: string; name?: string; slug?: string } | null }>;
   };
   reviews: { pageInfo?: { hasNextPage: boolean; endCursor: string | null }; nodes: Array<ReviewNode & Rx> };
   comments: { pageInfo?: { hasNextPage: boolean; endCursor: string | null }; nodes: Array<CommentNode & Rx> };
@@ -1285,7 +1286,7 @@ type RestPullRequest = {
   labels: Array<{ name: string }>;
   assignees: Array<Pick<RestUser, "login">>;
   requested_reviewers: RestUser[];
-  requested_teams: Array<{ name: string }>;
+  requested_teams: Array<{ name: string; slug?: string }>;
 };
 
 type RestPullRequestFile = { filename: string; additions: number; deletions: number };
@@ -1343,6 +1344,8 @@ export function mapRestPrDetailBase(pullRequest: RestPullRequest, files: RestPul
           requestedReviewer: {
             __typename: "Team",
             name: team.name,
+            // the slug is what team identity is matched on; the display name can be renamed freely
+            ...(team.slug ? { slug: team.slug } : {}),
           },
         })),
       ],
@@ -1503,6 +1506,7 @@ function normalizeReviewDetail(
   viewerLogin: string,
   author: Author | null,
   reviewRequests: RestPrDetailBase["reviewRequests"],
+  repo: string,
 ) {
   const { reactionGroups, reviews, comments, reviewThreads, ...scalars } = review;
   const viewerReviews = reviews.nodes
@@ -1512,7 +1516,10 @@ function normalizeReviewDetail(
     ...scalars,
     reactions: mapReactions(reactionGroups),
     viewerIsAuthor: author?.login === viewerLogin,
-    viewerReviewRequested: reviewRequests.nodes.some((request) => request.requestedReviewer?.login === viewerLogin),
+    // A request to the reviewers team is a request to its members: our PRs name the team, never a
+    // person, so without this half of the union nothing would ever be "awaiting my review".
+    viewerReviewRequested: reviewRequests.nodes.some((request) => request.requestedReviewer?.login === viewerLogin)
+      || teamReviewRequested(repo, reviewRequests.nodes),
     viewerReviewState: viewerReviews[0]?.state ?? null,
     reviews: {
       pageInfo: reviews.pageInfo,
@@ -1574,7 +1581,7 @@ export async function fetchPrDetail(
     ...rest,
     ...checks,
     viewerLogin,
-    ...normalizeReviewDetail(review, viewerLogin, review.author, rest.reviewRequests),
+    ...normalizeReviewDetail(review, viewerLogin, review.author, rest.reviewRequests, repo),
   };
 }
 
@@ -1618,7 +1625,7 @@ export async function fetchPrDetailPart(
   return {
     ...current,
     viewerLogin,
-    ...normalizeReviewDetail(review, viewerLogin, review.author, current.reviewRequests),
+    ...normalizeReviewDetail(review, viewerLogin, review.author, current.reviewRequests, repo),
   };
 }
 
