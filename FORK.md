@@ -16,6 +16,10 @@ git fetch upstream && git rebase upstream/main
 - Think you need a 4th line? You don't. ⌘5 wanted a key handler in there, so `ReviewShortcut.svelte`
   renders nothing and installs the listener itself; the Agents tab's turn helpers were worth reusing,
   so `agentTurns.js` holds a copy. Duplication beats a permanent conflict.
+- `ReviewShortcut.svelte` is the mount point for anything that must exist on *every* PR tab — the tab
+  bar renders it regardless of which tab is active. `PendingReviewBar.svelte` hangs off it and reads
+  the PR from the route hash instead of taking props, so the bar reaches the Files tab (where inline
+  comments are actually written) without PrDetail growing a line.
 - `repo_slug="Zeit-AI/pr-cockpit"` in `scripts/bootstrap` must survive every rebase.
 
 ## Looks like a mistake, is deliberate
@@ -36,6 +40,14 @@ Absolutes break it: *"Every question implies both"* made it render a full page f
 question. Keep it short and high-level — a checklist in there produces template-shaped pages.
 
 ## Traps
+
+- `COCKPIT_MOCK=1` is read-only: every unlisted POST/PUT returns `405 screenshot fixture mode is
+  read-only`. Fine for reading list and detail payloads, useless for exercising anything that writes,
+  so staged comments and offline pinning are covered by tests against an isolated `COCKPIT_DATA_DIR`
+  rather than by curling a fixture server.
+- A child process that imports `mutations.ts` must `process.exit(0)`, never `db.close()`. Importing it
+  starts the mutation worker, and the background drain faults on a closed database after your script
+  has already printed its result.
 
 - `webhooks.test.ts "migrates legacy window-keyed registrations"` fails only in the directory run.
   Upstream's, ignore it.

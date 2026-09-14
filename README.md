@@ -12,7 +12,7 @@ The queue separates **ready to merge**, **your move**, and **waiting**. Checks, 
 
 ## Zeit AI-specific instructions
 
-This is Zeit AI's fork of [`theolundqvist/pr-cockpit`](https://github.com/theolundqvist/pr-cockpit). Install it from **this** repository, not upstream — the commands further down point at the original.
+This is Zeit AI's fork of [`theolundqvist/pr-cockpit`](https://github.com/theolundqvist/pr-cockpit), and it has gone its own way: we build on it, we do not merge back from it. Install and update from **this** repository only.
 
 ### What we added
 
@@ -41,7 +41,7 @@ curl -fsSL https://raw.githubusercontent.com/Zeit-AI/pr-cockpit/main/scripts/boo
 
 That is the whole install. It checks prerequisites, clones this fork to `~/.pr-cockpit`, installs the desktop app and the `pr-cockpit` CLI, and opens setup. Sign in with your GitHub account when it asks — Cockpit reuses your `gh` login. Rerun the same command any time to update.
 
-Open the app from Spotlight afterwards. Do not run the upstream install command further down this README; it installs `theolundqvist/pr-cockpit` and you will not get the Review tab.
+Open the app from Spotlight afterwards. Every install command in this README points at this fork; there is no path here that installs a build without the Review tab.
 
 <details>
 <summary>If you already have upstream PR Cockpit installed</summary>
@@ -82,14 +82,19 @@ Update that install with `scripts/update` from the checkout, not the bootstrap c
 
 ### Updating
 
-`scripts/update` pulls `origin`, which is this fork. To take changes from upstream deliberately:
+**In the app.** Cockpit checks this fork for new commits every five minutes and offers an Update button
+when there are any. Pressing it is the whole procedure: it pulls, reinstalls, rebuilds the UI, and
+restarts the server and the app itself. You do not restart anything by hand, and you do not need a
+terminal. If the pull fails — no network, or local edits that collide — the update stops before
+restarting anything and the running version stays up; uncommitted changes are moved aside to a
+`local-edits-<timestamp>` branch rather than discarded.
 
-```sh
-git remote add upstream https://github.com/theolundqvist/pr-cockpit.git   # once
-git fetch upstream && git merge upstream/main
-```
+So shipping to everyone is: push to `main` on this fork. Within five minutes each install offers the
+button, and whoever presses it gets the new build.
 
-All Review-tab code lives in its own files (`server/review*.ts`, `ui/src/lib/Review*.svelte`). `ui/src/lib/PrDetail.svelte` — 200 KB in one file, and the one place upstream and this fork both edit — is touched in exactly three lines, so those merges stay clean. Keep it that way.
+**From a terminal**, in a checkout: `scripts/update`. Same steps, same guarantees.
+
+This fork does not merge from the original project. What we have is ours; changes come from us.
 
 ### Requirements
 
@@ -100,7 +105,7 @@ The review agent drives the `claude` CLI. Install it and sign in (`claude`), the
 Run this in your terminal as your normal user, **not with `sudo`**:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/theolundqvist/pr-cockpit/main/scripts/bootstrap | bash
+curl -fsSL https://raw.githubusercontent.com/Zeit-AI/pr-cockpit/main/scripts/bootstrap | bash
 ```
 
 [Read the installer first](scripts/bootstrap). It checks prerequisites, installs the desktop app and `pr-cockpit` CLI, and opens setup. On macOS it offers to install missing tools where supported; on Linux it checks system prerequisites and installs missing Bun and GitHub CLI tools into the managed installation.
@@ -219,7 +224,7 @@ Use Settings for day-to-day configuration. Optional shell overrides live in `~/.
 
 ## Contribute
 
-Found friction in a real review? [Open an issue](https://github.com/theolundqvist/pr-cockpit/issues) with what you were trying to do and what got in the way. Keep reports and screenshots free of private repository data.
+Found friction in a real review? [Open an issue](https://github.com/Zeit-AI/pr-cockpit/issues) with what you were trying to do and what got in the way. Keep reports and screenshots free of private repository data.
 
 Fixes, functionality, themes, and UI polish are welcome. Read the [contributor and agent guide](AGENTS.md) for development setup and repository conventions. New functionality must default off; styling must be opt-in unless it is minor polish that preserves the default appearance. Pull requests must include before-and-after screenshots showing their effect in the app.
 

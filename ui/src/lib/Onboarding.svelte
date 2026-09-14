@@ -349,7 +349,7 @@
             </div>
             <p class="small-copy">Install the GitHub App for the repositories you choose. An organization may require an owner's approval. This is separate from signing in.</p>
           {/if}
-          <a class="source-link" href="https://github.com/theolundqvist/pr-cockpit/tree/main/relay-server" target="_blank" rel="noreferrer">How the relay works <span aria-hidden="true">↗</span></a>
+          <a class="source-link" href="https://github.com/Zeit-AI/pr-cockpit/tree/main/relay-server" target="_blank" rel="noreferrer">How the relay works <span aria-hidden="true">↗</span></a>
         </section>
         <div class="actions"><button class="secondary back-button" type="button" onclick={back}>Back <Kbd keys="esc" /></button><button class="primary" type="submit">{coverageConfirmed ? "Build my inbox" : "Import now"} <span aria-hidden="true">→</span></button></div>
         {#if !coverageConfirmed}<p class="footer-note">No need to wait for live updates. You can set them up later in Settings.</p>{/if}
