@@ -10,6 +10,7 @@
   import Kbd from "./Kbd.svelte";
   import SettingsAnalytics from "./SettingsAnalytics.svelte";
   import SettingsNotifications from "./SettingsNotifications.svelte";
+  import OfflinePin from "./OfflinePin.svelte";
   import UpdateButton from "./UpdateButton.svelte";
   import { notificationRuleIssues, serializeNotificationSettings } from "./notificationEditor.js";
   import { defaultNotificationSettings } from "../../../shared/notificationRules.ts";
@@ -363,6 +364,8 @@
             <span class="hint">PRs involving you in these repositories. Enter one owner/name per line.</span>
             <textarea class="input mono" rows={Math.max(3, repos.split("\n").length)} bind:value={repos} spellcheck="false"></textarea>
           </label>
+
+          <OfflinePin repos={configuredRepos} />
 
           <label class="field">
             <span class="label">Default repository</span>

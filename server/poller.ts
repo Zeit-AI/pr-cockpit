@@ -16,6 +16,7 @@ import { reconcileForwarders } from "./forwarders.ts";
 import { prKeyOf } from "./prKey.ts";
 import { extractGithubImageUrls, prefetchImages } from "./imageproxy.ts";
 import { fetchMirror, pruneMirrors } from "./mirror.ts";
+import { pinnedRepos } from "./offline.ts";
 import { needsMeRank } from "./rank.ts";
 import { refreshRepoUsers } from "./repoUsers.ts";
 import { createPrRefreshScheduler } from "./refreshScheduler.ts";
@@ -274,7 +275,9 @@ export function createPollOnce(deps: PollDeps): () => Promise<{ checked: number;
     }
     const keepRepos = [...new Set([...repos, ...deps.listWebhookRegistrations().map((r) => r.repo)])];
     deps.evictReposNotIn(keepRepos);
-    deps.pruneMirrors(keepRepos);
+    // A repo pinned for offline reading keeps its mirror whatever the sweep would otherwise decide:
+    // the point of pinning is that the bytes are there when the network is not.
+    deps.pruneMirrors([...new Set([...keepRepos, ...pinnedRepos()])]);
 
     await sweepPrIndexIfDue(repos);
     lastPollAt = new Date().toISOString();

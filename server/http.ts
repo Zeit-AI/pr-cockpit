@@ -90,6 +90,7 @@ import { runtimeSupervisor } from "./supervisor.ts";
 import type { GithubUsageSource } from "./githubUsage.ts";
 import type { GithubAuthStatus } from "./githubAuth.ts";
 import { commitsFromMirror, commitStatsFromMirror, conflictFilesFromMirror, diffFromMirror, fetchMirror, fileFromMirror, INCREMENTAL_FETCH_TIMEOUT_MS, materializePrWorktree, MirrorFetchError, summarizeCommitStats, type PullRequestCommit } from "./mirror.ts";
+import { handleOfflineRoute, staleFileContents, warmPrFilesInBackground } from "./offline.ts";
 import { checkState, type CheckState } from "./checkState.ts";
 import { currentBaseRef, discardMutation, enqueueMutation, mutationsForPr, retryMutation, type MutationPayload } from "./mutations.ts";
 import { isMergeMethod, mergeMethodFor, mergeMethodSourceFor, setMergeMethodPreference } from "./mergeMethod.ts";
@@ -711,6 +712,10 @@ async function handlePrDetail(
   const repoName = `${owner}/${repo}`;
   const num = Number(number);
   void fetchMirror(repoName).catch(() => {});
+  // Opening a PR is the moment to pay for reading it later: warm every changed blob out of the mirror
+  // now, so expanding a diff on a dead network is a cache hit rather than a failed fetch. Background,
+  // deduplicated, and mirror-only - it never spends GitHub quota and never delays this response.
+  if (!agentRead) warmPrFilesInBackground(repoName, num);
 
   let tracked = getPr(repoName, num);
   if (agentRead && tracked) {
@@ -773,6 +778,8 @@ async function handlePrDetail(
       detail_json: JSON.stringify(detail),
       fetched_at: snapshotCutoffAt,
     });
+    // first open: the detail only exists now, so the warm attempt above had nothing to work from
+    if (!agentRead) warmPrFilesInBackground(repoName, num);
     const response = withBaseBranchPr(repoName, num, detail);
     return json(agentRead ? { ...response, agentSnapshot: snapshotStatus(snapshotCutoffAt, lastWebhookAtForPr(repoName, num)) } : response);
   } catch (err) {
@@ -2087,6 +2094,9 @@ async function handleSearchPrs(url: URL): Promise<Response> {
   return json({ results });
 }
 
+// Diff expansion, local-first in three steps: the blob cache, then the repo mirror, then GitHub. The
+// mirror step is what makes expansion work on a plane - it holds every commit of every tracked repo,
+// so a cold cache is not by itself a reason to need the network.
 async function handleFile(url: URL): Promise<Response> {
   const repo = url.searchParams.get("repo");
   const path = url.searchParams.get("path");
@@ -2096,15 +2106,28 @@ async function handleFile(url: URL): Promise<Response> {
   const cached = getFileContents(sha, path);
   if (cached !== null) return json({ content: cached });
 
+  const fromMirror = await fileFromMirror(repo, sha, path).catch(() => null);
+  if (fromMirror?.status === "ok") {
+    saveFileContents(sha, path, fromMirror.content);
+    return json({ content: fromMirror.content });
+  }
+  // The mirror answering "not-found" is authoritative: the commit is present and the file is not in it.
+  if (fromMirror?.status === "not-found") return json({ error: "not found" }, 404);
+
   try {
     const result = await fetchFileContents(repo, path, sha);
     if ("tooLarge" in result) return json({ tooLarge: true });
     saveFileContents(sha, path, result.content);
     return json({ content: result.content });
   } catch (error) {
+    // Offline, with this exact blob missing but the same file cached at another commit: show that
+    // instead of an error, labelled, so the reader still gets the code around the change.
+    const stale = staleFileContents(path, sha);
+    if (stale) return json({ content: stale.content, stale: true, staleSha: stale.sha });
     return githubErrorResponse(error, "GitHub file fetch failed");
   }
 }
+
 
 const CANONICAL_REPO_RE = /^(?!\.{1,2}\/)[A-Za-z0-9_.-]+\/(?!\.{1,2}$)[A-Za-z0-9_.-]+$/;
 const MAX_COMMIT_HEADLINE_LENGTH = 200;
@@ -2586,7 +2609,7 @@ function handleGithubAppStart(url: URL, port: number): Response {
   if (!org) return html("<p>missing org query param</p>", 400);
   const manifest = {
     name: "pr-cockpit-relay",
-    url: "https://github.com/theolundqvist/pr-cockpit",
+    url: "https://github.com/Zeit-AI/pr-cockpit",
     hook_attributes: { url: `${relayConfig().url}/github`, active: true },
     redirect_url: `http://127.0.0.1:${port}/api/github-app/callback`,
     public: true,
@@ -3193,6 +3216,8 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
       if (!detail) return json({ error: "no such run" }, 404);
       return json(detail);
     }
+    const offline = await handleOfflineRoute(parts, req, url);
+    if (offline) return offline;
     // global, not per PR: "/review/config" and its "/api"-prefixed twin
     if (
       (parts.length === 2 && parts[0] === "review" && parts[1] === "config") ||
