@@ -2,7 +2,7 @@
 
 This repository is worked on by humans and coding agents alike. Leave it easier to operate than you found it.
 
-This is Zeit AI's fork. Read `FORK.md` first: what we added, how to change it without breaking the merge with upstream, and the traps that already cost us time.
+This is Zeit AI's fork. Read `FORK.md` first: how to change it without making the next rebase expensive, and the traps that already cost us time.
 
 ## Layout
 
