@@ -988,6 +988,10 @@
               <span class="sep">·</span>
               <span class="threads">{pr.unresolvedCount} unresolved</span>
             {/if}
+            {#if pr.stagedCount > 0}
+              <span class="sep">·</span>
+              <span class="staged" title="Review comments written but not submitted">{pr.stagedCount} staged</span>
+            {/if}
           </div>
         </div>
         {#if pr.reviewScore != null}
@@ -1653,6 +1657,10 @@
   }
   .row-meta .threads {
     color: var(--review);
+  }
+  /* an unsubmitted review of my own: the one count in this row nobody else can see yet */
+  .row-meta .staged {
+    color: var(--native-orange);
   }
   .greptile {
     flex: none;

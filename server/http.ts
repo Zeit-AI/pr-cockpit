@@ -114,6 +114,8 @@ import {
   listFixerAgents,
   type AgentRow,
 } from "./agents.ts";
+import { handlePendingReviewRoute } from "./pendingReviewHttp.ts";
+import { pendingCountsByPr } from "./pendingReview.ts";
 import { currentPrHead, enqueueReview, reviewActivity } from "./reviewAgent.ts";
 import { REVIEW_EFFORTS, REVIEW_MODEL_CHOICES, reviewConfig, writeReviewConfig } from "./reviewConfig.ts";
 import { readReviewMeta, readTranscript, resolveReviewFile, reviewContentType, reviewDir, REVIEW_HTML } from "./reviews.ts";
@@ -310,6 +312,8 @@ async function handleInbox(url: URL): Promise<Response> {
   }
   const ranks = getRanks();
   const agentByPr = new Map<string, AgentRow>(listFixerAgents().map((a) => [prKey(a), a]));
+  // one grouped query for the whole list; a per-row count would be a query per PR
+  const stagedCounts = pendingCountsByPr();
   const testRe = testMatcher(readSettings().test_path_regex);
 
   const rows = prs.map((pr) => {
@@ -357,6 +361,7 @@ async function handleInbox(url: URL): Promise<Response> {
       rank: ranks.get(prKey(pr)) ?? null,
       fixerAgentState: agentByPr.get(prKey(pr))?.state ?? null,
       fixerAgentExitReason: agentByPr.get(prKey(pr))?.exit_reason ?? null,
+      stagedCount: stagedCounts.get(prKey(pr)) ?? 0,
     };
   });
 
@@ -3195,6 +3200,8 @@ export function buildFetchHandler(port: number, dependencyOverrides: Partial<Htt
     ) {
       if (req.method === "GET" || req.method === "PUT") return handleReviewConfig(req, url);
     }
+    const pendingReview = await handlePendingReviewRoute(parts, req);
+    if (pendingReview) return pendingReview;
     const review = reviewRoute(parts);
     if (review) {
       if (req.method === "POST" && review.rest === "ask") return handleReviewAsk(review.repo, review.number, req);

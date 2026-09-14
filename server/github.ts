@@ -2231,6 +2231,38 @@ export async function postReview(repo: string, number: number, event: string, bo
   await restRequest("POST", `/repos/${repo}/pulls/${number}/reviews`, { event, body });
 }
 
+// One review carrying every staged inline comment. The per-comment endpoint publishes each remark as
+// its own COMMENTED review, which notifies immediately and clears the viewer out of the requested
+// reviewers; this submits once, so the PR only moves lanes when the reviewer says it should.
+export async function postReviewWithComments(
+  repo: string,
+  number: number,
+  event: string,
+  body: string,
+  comments: Array<{
+    path: string;
+    line: number;
+    side: "LEFT" | "RIGHT";
+    startLine?: number;
+    startSide?: "LEFT" | "RIGHT";
+    body: string;
+  }>,
+): Promise<void> {
+  await restRequest("POST", `/repos/${repo}/pulls/${number}/reviews`, {
+    event,
+    body,
+    comments: comments.map((comment) => ({
+      path: comment.path,
+      line: comment.line,
+      side: comment.side,
+      ...(comment.startLine === undefined
+        ? {}
+        : { start_line: comment.startLine, start_side: comment.startSide ?? comment.side }),
+      body: comment.body,
+    })),
+  });
+}
+
 export async function mergePullRequest(repo: string, number: number, method: MergeMethod, sha?: string): Promise<void> {
   await restRequest("PUT", `/repos/${repo}/pulls/${number}/merge`, sha ? { merge_method: method, sha } : { merge_method: method });
 }

@@ -20,6 +20,7 @@ import {
   postIssueComment,
   postReview,
   postReviewCommentReply,
+  postReviewWithComments,
   removeAssignees,
   removeRequestedReviewers,
   requestReviewers,
@@ -30,6 +31,7 @@ import {
   updatePullRequestBranch,
   type PrDetail,
 } from "./github.ts";
+import { clearSubmitted, isStagedMode, releaseClaim, snapshotCommentsIntoMutation, stageComment, type PendingReviewComment } from "./pendingReview.ts";
 import { pollOnce, refreshPr } from "./poller.ts";
 import { killFixerAgent, launchFixerAgent } from "./agents.ts";
 import { refreshRepoUsers } from "./repoUsers.ts";
@@ -39,7 +41,7 @@ export type MutationPayload =
   | { kind: "comment"; body: string; commentNodeId?: string }
   | { kind: "reply-to-thread"; rootCommentId: number; body: string }
   | { kind: "resolve-thread"; threadId: string; resolved: boolean }
-  | { kind: "review-verdict"; event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"; body: string }
+  | { kind: "review-verdict"; event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT"; body: string; comments?: PendingReviewComment[] }
   | { kind: "merge"; force: boolean; baseRef: string; method: MergeMethod; source: MergeMethodSource }
   | { kind: "update-branch" }
   | { kind: "ready-for-review" }
@@ -105,6 +107,13 @@ export function enqueueMutation(params: { repo: string; number: number; payload:
   if (params.payload.kind === "edit-title" && !params.payload.title.trim()) {
     throw new Error("pull request title cannot be empty");
   }
+  // A staged PR keeps inline comments out of the queue entirely: the queue is for calls already
+  // decided on, and a draft remark is not one. They rejoin at submit time as a review-verdict payload.
+  // Returns a pending_review_comments id rather than a mutations id. Callers treat the result as an
+  // opaque receipt and refetch; the two id spaces are told apart by the `staged` flag on the response.
+  if (params.payload.kind === "inline-comment" && isStagedMode(params.repo, params.number)) {
+    return stageComment(params.repo, params.number, params.payload);
+  }
   const id = insertMutation({
     repo: params.repo,
     number: params.number,
@@ -112,6 +121,9 @@ export function enqueueMutation(params: { repo: string; number: number; payload:
     payload_json: JSON.stringify(params.payload),
     created_at: new Date().toISOString(),
   });
+  if (params.payload.kind === "review-verdict") {
+    snapshotCommentsIntoMutation(params.repo, params.number, id, params.payload);
+  }
   kickWorker();
   return id;
 }
@@ -126,6 +138,9 @@ export function retryMutation(id: number): void {
 }
 
 export function discardMutation(id: number): void {
+  // The staged comments outlive a discarded submit: throwing away a failed API call must not throw
+  // away the review that was written by hand.
+  releaseClaim(id);
   deleteMutation(id);
 }
 
@@ -170,13 +185,20 @@ async function executeMutation(row: MutationRow): Promise<boolean> {
     case "review-verdict": {
       const pr = getPr(row.repo, row.number);
       const viewerLogin = await getViewerLogin();
+      // Comments were snapshotted into the payload when the review was submitted, so a submit that
+      // was queued offline ships exactly the review the reviewer saw, not whatever staging holds now.
+      const comments = payload.comments ?? [];
       if (payload.event !== "COMMENT" && pr?.author === viewerLogin) {
         const prefix = payload.event === "APPROVE" ? "**APPROVED**" : "**CHANGES REQUESTED**";
         const body = payload.body ? `${prefix}\n\n${payload.body}` : prefix;
-        await postReview(row.repo, row.number, "COMMENT", body);
+        if (comments.length > 0) await postReviewWithComments(row.repo, row.number, "COMMENT", body, comments);
+        else await postReview(row.repo, row.number, "COMMENT", body);
+      } else if (comments.length > 0) {
+        await postReviewWithComments(row.repo, row.number, payload.event, payload.body, comments);
       } else {
         await postReview(row.repo, row.number, payload.event, payload.body);
       }
+      clearSubmitted(row.id);
       return false;
     }
     case "merge": {
