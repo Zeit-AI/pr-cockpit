@@ -19,12 +19,14 @@ const {
   toComment,
   updatePendingComment,
 } = await import("./pendingReview.ts");
+const { parseStagedId, serializeStagedComment } = await import("./pendingReviewHttp.ts");
 const { db } = await import("./db.ts");
 
 const REPO = "acme/repo";
 
 beforeEach(() => {
   db.exec("DELETE FROM pending_review_comments");
+  db.exec("DELETE FROM mutations");
 });
 
 describe("staging mode", () => {
@@ -110,5 +112,48 @@ describe("submit lifecycle", () => {
 
   test("claiming an empty PR yields no comments, so the verdict ships alone", () => {
     expect(claimForSubmit(REPO, 9, 78)).toEqual([]);
+  });
+});
+
+describe("mutation-shaped serialization", () => {
+  test("a staged comment carries the keys the diff anchors on", () => {
+    stageComment(REPO, 1, { path: "src/app.ts", line: 42, side: "RIGHT", body: "note" });
+    const row = listPendingComments(REPO, 1)[0]!;
+    const serialized = serializeStagedComment(row);
+    // DiffView keys pending inline comments as `${path}:${side}:${line}`
+    expect(serialized.payload.path).toBe("src/app.ts");
+    expect(serialized.payload.side).toBe("RIGHT");
+    expect(serialized.payload.line).toBe(42);
+    expect(serialized.kind).toBe("inline-comment");
+  });
+
+  test("ids are namespaced so a discard cannot reach the mutations table", () => {
+    const id = stageComment(REPO, 1, { path: "a.ts", line: 1, side: "RIGHT", body: "x" });
+    const serialized = serializeStagedComment(listPendingComments(REPO, 1)[0]!);
+    expect(serialized.id).toBe(`staged:${id}`);
+    expect(parseStagedId(serialized.id)).toBe(id);
+    // a plain mutation id must never be mistaken for a staged one
+    expect(parseStagedId(String(id))).toBe(null);
+    expect(parseStagedId("staged:0")).toBe(null);
+    expect(parseStagedId("staged:not-a-number")).toBe(null);
+  });
+
+  test("state follows the review the comment rides in", () => {
+    stageComment(REPO, 1, { path: "a.ts", line: 1, side: "RIGHT", body: "x" });
+    expect(serializeStagedComment(listPendingComments(REPO, 1)[0]!).state).toBe("staged");
+
+    // claimed by a queued review that has not run yet
+    db.query("INSERT INTO mutations (id, repo, number, kind, payload_json, state, error, created_at) VALUES (900, ?, 1, 'review-verdict', '{}', 'pending', NULL, ?)")
+      .run(REPO, new Date().toISOString());
+    claimForSubmit(REPO, 1, 900);
+    expect(serializeStagedComment(listPendingComments(REPO, 1)[0]!).state).toBe("pending");
+
+    // that review failed: the comment did not go out, and the verdict owns the retry
+    db.query("UPDATE mutations SET state = 'failed' WHERE id = 900").run();
+    expect(serializeStagedComment(listPendingComments(REPO, 1)[0]!).state).toBe("submit-failed");
+
+    // discarding the verdict releases the claim and the comment is editable again
+    releaseClaim(900);
+    expect(serializeStagedComment(listPendingComments(REPO, 1)[0]!).state).toBe("staged");
   });
 });

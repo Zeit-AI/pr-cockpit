@@ -115,8 +115,8 @@ import {
   listFixerAgents,
   type AgentRow,
 } from "./agents.ts";
-import { handlePendingReviewRoute } from "./pendingReviewHttp.ts";
-import { pendingCountsByPr } from "./pendingReview.ts";
+import { handlePendingReviewRoute, parseStagedId, stagedCommentsForPr } from "./pendingReviewHttp.ts";
+import { deletePendingComment, pendingCountsByPr } from "./pendingReview.ts";
 import { currentPrHead, enqueueReview, reviewActivity } from "./reviewAgent.ts";
 import { REVIEW_EFFORTS, REVIEW_MODEL_CHOICES, reviewConfig, writeReviewConfig } from "./reviewConfig.ts";
 import { readReviewMeta, readTranscript, resolveReviewFile, reviewContentType, reviewDir, REVIEW_HTML } from "./reviews.ts";
@@ -2740,15 +2740,27 @@ function handleListMutations(url: URL): Response {
   const repo = url.searchParams.get("repo");
   const number = url.searchParams.get("number");
   if (!repo || !number) return json({ error: "repo and number query params required" }, 400);
-  return json({ mutations: mutationsForPr(repo, Number(number)).map(serializeMutation) });
+  // Staged review comments are merged in so the diff anchors them to the line they were written on.
+  // They are rows in another table wearing the mutation shape; only their namespaced id gives it away.
+  const num = Number(number);
+  return json({
+    mutations: [...mutationsForPr(repo, num).map(serializeMutation), ...stagedCommentsForPr(repo, num)],
+  });
 }
 
 function handleRetryMutation(id: string): Response {
+  // A staged comment was never sent, so there is nothing to retry; the composer is the way back to it.
+  if (parseStagedId(id) !== null) return json({ error: "staged comments are not retryable" }, 400);
   retryMutation(Number(id));
   return json({ ok: true });
 }
 
 function handleDiscardMutation(id: string): Response {
+  const stagedId = parseStagedId(id);
+  if (stagedId !== null) {
+    if (!deletePendingComment(stagedId)) return json({ error: "comment is already being submitted" }, 409);
+    return json({ ok: true });
+  }
   discardMutation(Number(id));
   return json({ ok: true });
 }

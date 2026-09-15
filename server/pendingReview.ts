@@ -115,6 +115,14 @@ export function pendingCountsByPr(): Map<string, number> {
   return new Map(rows.map((row) => [`${row.repo}#${row.number}`, row.n]));
 }
 
+// The state of the review a claimed comment is riding in. Null when the comment is still editable,
+// or when the owning mutation is gone - a discarded submit releases the claim, so that cannot linger.
+export function owningMutationState(row: PendingReviewCommentRow): string | null {
+  if (row.submitted_mutation_id === null) return null;
+  const owner = db.query("SELECT state FROM mutations WHERE id = ?").get(row.submitted_mutation_id) as { state: string } | null;
+  return owner?.state ?? null;
+}
+
 export function toComment(row: PendingReviewCommentRow): PendingReviewComment {
   return {
     path: row.path,
