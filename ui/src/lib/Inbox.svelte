@@ -1771,8 +1771,16 @@
   }
   .repo-filter {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     margin-left: auto;
+  }
+  /* two pickers side by side: the button text ("All authors", "owner/repo") already names the field */
+  .repo-filter :global(.field-label) {
+    display: none;
+  }
+  .repo-filter :global(.trigger) {
+    width: auto;
+    max-width: 176px;
   }
   .view-tab {
     display: flex;
