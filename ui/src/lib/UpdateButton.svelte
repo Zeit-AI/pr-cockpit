@@ -1,6 +1,7 @@
 <script>
   import { checkForUpdates, fetchVersion, triggerUpdate } from "./api.js";
   import { showFlash } from "./flash.svelte.js";
+  import { pollIntervalMs, updateOutcome } from "./updateProgress.js";
 
   let { manual = false } = $props();
   let checking = $state(false);
@@ -32,16 +33,25 @@
     try {
       const { updateAvailable, rev } = await fetchVersion();
       available = updateAvailable;
-      if (!rev) return;
-      if (loadedRev === null) loadedRev = rev;
-      else if (rev !== loadedRev) location.reload();
-    } catch {}
+      const outcome = updateOutcome({ rev, loadedRev, updateAvailable, updating });
+      if (loadedRev === null && rev) loadedRev = rev;
+      // new build on disk: reload so the window stops running the bundle it was served
+      if (outcome === "reload") location.reload();
+      else if (outcome === "settled") {
+        updating = false;
+        showFlash("Already up to date.");
+      }
+    } catch {
+      // the server is mid-restart; the next tick picks it back up
+    }
   }
 
+  // While an update is running the server is being restarted underneath us, so poll at a rate that
+  // notices it coming back. Idle polling stays slow: it only has to catch someone else's push.
   $effect(() => {
     if (manual && !updating) return;
     poll();
-    const timer = setInterval(poll, manual ? 1000 : 5 * 60 * 1000);
+    const timer = setInterval(poll, pollIntervalMs({ updating, manual }));
     return () => clearInterval(timer);
   });
 
@@ -59,7 +69,13 @@
     updating = true;
     try {
       await triggerUpdate();
-      setTimeout(() => (updating = false), 60000);
+      // Backstop only. The poll above normally ends the progress state by reloading the window or by
+      // reporting that there was nothing to pull; this catches an update that never comes back.
+      setTimeout(() => {
+        if (!updating) return;
+        updating = false;
+        showFlash("Update is taking longer than expected — check the app again in a moment.");
+      }, 60000);
     } catch (err) {
       updating = false;
       showFlash(`Update failed: ${err.message}`);
