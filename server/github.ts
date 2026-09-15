@@ -1,4 +1,5 @@
 import type { MergeMethod } from "./mergeMethod.ts";
+import { effectiveReviewDecision } from "./reviewDecision.ts";
 import { teamReviewRequested } from "./reviewerTeam.ts";
 import { mockGithub, MOCK_FIXTURE_CLOCK } from "./mockGithub.ts";
 import {
@@ -1514,6 +1515,8 @@ function normalizeReviewDetail(
     .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
   return {
     ...scalars,
+    // null here means "no review required", not "not reviewed" - read the approval off the reviews
+    reviewDecision: effectiveReviewDecision(scalars.reviewDecision, reviews.nodes, author?.login ?? null),
     reactions: mapReactions(reactionGroups),
     viewerIsAuthor: author?.login === viewerLogin,
     // A request to the reviewers team is a request to its members: our PRs name the team, never a
