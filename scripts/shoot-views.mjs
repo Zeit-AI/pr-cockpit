@@ -97,6 +97,29 @@ const scenarios = [
   repositoryPickerScenario(false),
   repositoryPickerScenario(true),
   {
+    name: "inbox-author-picker",
+    route: "#/",
+    description: "Author picker narrows the queue to one person's pull requests without moving the main list.",
+    ready: ".inbox-layout .queue-group",
+    interact: async (page) => {
+      const selectedRow = () => page.locator(".inbox .row.selected").getAttribute("href");
+      const originalRow = await selectedRow();
+      await page.keyboard.press("u");
+      const menu = page.getByRole("menu", { name: "Author filters" });
+      await menu.waitFor();
+      await menu.locator('[aria-checked="true"]:focus').waitFor();
+      await page.keyboard.press("ArrowDown");
+      if (await selectedRow() !== originalRow) throw new Error("Author navigation moved the main list");
+      const author = await menu.locator("button:focus span").last().textContent();
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(() => document.querySelectorAll('[role="menu"] [aria-checked="true"]').length === 1);
+      await page.waitForFunction((author) => {
+        const rows = [...document.querySelectorAll(".inbox .row")];
+        return rows.length > 0 && rows.every((row) => row.querySelector("img")?.getAttribute("alt") === author);
+      }, author);
+    },
+  },
+  {
     name: "inbox-populated",
     route: "#/",
     description: "Populated inbox with mixed ownership, CI, review, and merge states.",

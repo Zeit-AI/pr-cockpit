@@ -20,6 +20,7 @@
   import { timedFlag } from "./timedFlag.svelte.js";
   import { prKey } from "./prKey.js";
   import { availableRepositories, filterByRepositories } from "./repoFilter.js";
+  import { availableAuthors, filterByAuthors } from "./authorFilter.js";
   import { showFlash } from "./flash.svelte.js";
   import CurrentBranchBadge from "./CurrentBranchBadge.svelte";
   import Kbd from "./Kbd.svelte";
@@ -91,6 +92,9 @@
   let configuredRepos = $state([]);
   let selectedRepos = $state(storedRepositories());
   let repoPickerOpen = $state(false);
+  // ponytail: author scope is per session, not persisted; a sticky one silently hides PRs after a reload
+  let selectedAuthors = $state([]);
+  let authorPickerOpen = $state(false);
   let pollIntervalS = $state(180);
   const inboxMountedAt = Date.now();
 
@@ -110,6 +114,11 @@
     selectedRepos = [...repos];
     if (repos.length) localStorage.setItem("cockpit:repository-scope", JSON.stringify(repos));
     else localStorage.removeItem("cockpit:repository-scope");
+    selected = 0;
+  }
+
+  function selectAuthors(authors) {
+    selectedAuthors = [...authors];
     selected = 0;
   }
 
@@ -301,7 +310,7 @@
       const selectedKey = view === "closed" && ordered[selected] ? prKey(ordered[selected]) : null;
       closedPrs = res.prs;
       if (selectedKey !== null) {
-        const idx = filterByRepositories(closedPrs, selectedRepos).findIndex((pr) => prKey(pr) === selectedKey);
+        const idx = filterByAuthors(filterByRepositories(closedPrs, selectedRepos), selectedAuthors).findIndex((pr) => prKey(pr) === selectedKey);
         if (idx >= 0) selected = idx;
       }
     } catch {
@@ -316,7 +325,7 @@
     const repos = [...selectedRepos];
     const scope = JSON.stringify(repos);
     const selectedKey = scope === allPrsScope
-      ? restoreKey ?? (allPrs[selected] ? prKey(allPrs[selected]) : allPrsSelectedKey)
+      ? restoreKey ?? (filteredAllPrs[selected] ? prKey(filteredAllPrs[selected]) : allPrsSelectedKey)
       : null;
     const seq = ++allPrsSeq;
     allPrsScope = scope;
@@ -330,9 +339,9 @@
       allPrs = res.prs;
       allPrsRepos = [...new Set([...allPrsRepos, ...res.prs.map((pr) => pr.repo)])];
       restoreKey = null;
-      const index = selectedKey === null ? -1 : allPrs.findIndex((pr) => prKey(pr) === selectedKey);
+      const index = selectedKey === null ? -1 : filteredAllPrs.findIndex((pr) => prKey(pr) === selectedKey);
       selected = Math.max(0, index);
-      allPrsSelectedKey = allPrs[selected] ? prKey(allPrs[selected]) : null;
+      allPrsSelectedKey = filteredAllPrs[selected] ? prKey(filteredAllPrs[selected]) : null;
       scrollSelectedIntoView();
     } catch (e) {
       if (seq === allPrsSeq && active && view === "all" && scope === JSON.stringify(selectedRepos)) {
@@ -395,8 +404,10 @@
   let historyActive = $derived(wantsHistory(filterQuery) && historyQuery === filterQuery.trim() && !historyLoading);
   let queryFilteredPrs = $derived(wantsHistory(filterQuery) ? (historyQuery === filterQuery.trim() ? historyPrs : []) : filterPrs(prs, filterQuery, showArchived));
   let availableRepos = $derived(availableRepositories(view === "all" ? [...configuredRepos, ...allPrsRepos, ...selectedRepos] : configuredRepos, prs, archivedPrs, closedPrs));
-  let filteredPrs = $derived(filterByRepositories(queryFilteredPrs, selectedRepos));
-  let filteredClosedPrs = $derived(filterByRepositories(closedPrs, selectedRepos));
+  let authorOptions = $derived(availableAuthors(prs, archivedPrs, closedPrs, allPrs));
+  let filteredPrs = $derived(filterByAuthors(filterByRepositories(queryFilteredPrs, selectedRepos), selectedAuthors));
+  let filteredClosedPrs = $derived(filterByAuthors(filterByRepositories(closedPrs, selectedRepos), selectedAuthors));
+  let filteredAllPrs = $derived(filterByAuthors(allPrs, selectedAuthors));
   let actionsHref = $derived.by(() => {
     const params = new URLSearchParams();
     if (selectedRepos.length === 0) params.append("repo", "");
@@ -614,7 +625,7 @@
     const pr = prs.find((p) => prKey(p) === dragKey);
     return pr ? (pr.rank != null ? "pinned" : classify(topUnit(pr), viewerLogin).group) : null;
   });
-  let ordered = $derived(view === "all" ? allPrs : view === "closed" ? filteredClosedPrs : showArchived ? [...openOrdered, ...archivedPrs] : openOrdered);
+  let ordered = $derived(view === "all" ? filteredAllPrs : view === "closed" ? filteredClosedPrs : showArchived ? [...openOrdered, ...archivedPrs] : openOrdered);
   let archivedSet = $derived(new Set(archivedPrs.map((pr) => prKey(pr))));
   const isArchived = (pr) => archivedSet.has(prKey(pr));
 
@@ -652,7 +663,7 @@
   function scrollSelectedIntoView(focusRow = false) {
     requestAnimationFrame(() => {
       const row = document.querySelector(".inbox .row.selected");
-      if (focusRow && !repoPickerOpen) row?.focus({ preventScroll: true });
+      if (focusRow && !repoPickerOpen && !authorPickerOpen) row?.focus({ preventScroll: true });
       row?.scrollIntoView({ block: "nearest" });
     });
   }
@@ -725,7 +736,7 @@
   $effect(() => {
     if (!active) return;
     function onKey(e) {
-      if (e.defaultPrevented || (repoPickerOpen && e.key !== "r")) return;
+      if (e.defaultPrevented || (repoPickerOpen && e.key !== "r") || (authorPickerOpen && e.key !== "u")) return;
       if (e.metaKey && e.key === ",") {
         location.hash = "#/settings";
         e.preventDefault();
@@ -758,6 +769,11 @@
       if (isTypingTarget(e.target)) return;
       if (e.key === "r") {
         repoPickerOpen = !repoPickerOpen;
+        e.preventDefault();
+        return;
+      }
+      if (e.key === "u") {
+        authorPickerOpen = !authorPickerOpen;
         e.preventDefault();
         return;
       }
@@ -880,7 +896,7 @@
       <div class="view-tabs" role="tablist" aria-label="List view">
         <button class="view-tab" role="tab" aria-selected={view === "open"} class:active={view === "open"} onclick={() => showView("open")}>
           Open
-          <span class="view-tab-count">{filterByRepositories(prs, selectedRepos).length}</span>
+          <span class="view-tab-count">{filterByAuthors(filterByRepositories(prs, selectedRepos), selectedAuthors).length}</span>
           {#if view === "closed"}<Kbd keys="tab" />{/if}
         </button>
         <button class="view-tab" role="tab" aria-selected={view === "all"} class:active={view === "all"} onclick={() => showView("all")}>
@@ -900,6 +916,15 @@
           keybind="r"
           bind:open={repoPickerOpen}
           onchange={selectRepositories}
+        />
+        <MultiSelectDropdown
+          label="Author"
+          options={authorOptions}
+          selected={selectedAuthors}
+          plural="authors"
+          keybind="u"
+          bind:open={authorPickerOpen}
+          onchange={selectAuthors}
         />
       </div>
     </div>
@@ -1115,12 +1140,12 @@
             </div>
           {:else if allPrsLoading}
             <div class="empty" role="status">Loading all PRs…</div>
-          {:else if allPrs.length === 0}
-            <div class="empty">No open pull requests in {selectedRepos.length ? "the selected" : "tracked"} repositories</div>
+          {:else if filteredAllPrs.length === 0}
+            <div class="empty">No open pull requests {selectedAuthors.length ? "by the selected authors" : ""} in {selectedRepos.length ? "the selected" : "tracked"} repositories</div>
           {:else}
             <section class="queue-group" aria-label="All open pull requests">
               <div class="group-body">
-                {#each allPrs as pr, index (prKey(pr))}{@render allPrRow(pr, index)}{/each}
+                {#each filteredAllPrs as pr, index (prKey(pr))}{@render allPrRow(pr, index)}{/each}
               </div>
             </section>
           {/if}
@@ -1130,7 +1155,7 @@
           {:else if closedPrs.length === 0}
             <div class="empty">Nothing merged or closed yet</div>
           {:else if filteredClosedPrs.length === 0}
-            <div class="empty">Nothing merged or closed in the selected repositories</div>
+            <div class="empty">Nothing merged or closed matches the selected filters</div>
           {/if}
           <section class="queue-group">
             <div class="group-body">
@@ -1144,8 +1169,8 @@
             <div class="empty">Syncing with GitHub…</div>
           {:else if loaded && prs.length === 0}
             <div class="empty">No open pull requests</div>
-          {:else if selectedRepos.length && filteredPrs.length === 0}
-            <div class="empty">No open pull requests in the selected repositories</div>
+          {:else if (selectedRepos.length || selectedAuthors.length) && filteredPrs.length === 0}
+            <div class="empty">No open pull requests match the selected filters</div>
           {:else if wantsHistory(filterQuery) && !historyActive}
             <div class="empty">Searching history…</div>
           {:else if filterQuery && filteredPrs.length === 0}
@@ -1745,6 +1770,8 @@
     margin-bottom: 16px;
   }
   .repo-filter {
+    display: flex;
+    gap: 8px;
     margin-left: auto;
   }
   .view-tab {
