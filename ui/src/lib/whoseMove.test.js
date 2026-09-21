@@ -172,8 +172,33 @@ describe("classify: your move as author", () => {
   });
 
   test("my PR awaiting review with no feedback waits", () => {
-    const result = classify(pr({ viewerIsAuthor: true, reviewDecision: "REVIEW_REQUIRED" }), "viewer");
+    const result = classify(pr({ viewerIsAuthor: true, reviewDecision: "REVIEW_REQUIRED", hasReviewer: true }), "viewer");
     expect(result.group).toBe("waiting");
+  });
+
+  test("my open PR with nobody on the hook is mine to send out", () => {
+    const result = classify(pr({ viewerIsAuthor: true, hasReviewer: false }), "viewer");
+    expect(result).toEqual({ group: "yours", tone: "review", label: "no reviewer" });
+  });
+
+  test("a failing PR with no reviewer still reads as failing", () => {
+    const result = classify(pr({ viewerIsAuthor: true, hasReviewer: false, ciStatus: "FAILURE" }), "viewer");
+    expect(result.label).toBe("failing");
+  });
+
+  test("my draft with no reviewer keeps its draft lane", () => {
+    const result = classify(pr({ viewerIsAuthor: true, hasReviewer: false, isDraft: true }), "viewer");
+    expect(result).toEqual({ group: "waiting", tone: "wait", label: "draft" });
+  });
+
+  test("someone else's PR with no reviewer is not my move", () => {
+    const result = classify(pr({ hasReviewer: false }), "viewer");
+    expect(result.group).toBe("waiting");
+  });
+
+  test("an unknown reviewer field classifies the way it always did", () => {
+    const result = classify(pr({ viewerIsAuthor: true }), "viewer");
+    expect(result).toEqual({ group: "waiting", tone: "wait", label: "waiting on review" });
   });
 });
 

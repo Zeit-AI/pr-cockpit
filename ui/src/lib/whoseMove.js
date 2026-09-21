@@ -58,6 +58,13 @@ function baseClassify(pr, viewerLogin) {
     if (pr.mergeable === "CONFLICTING") return { group: "yours", tone: "fail", label: "conflicts" };
   }
 
+  // Mine, open, and nobody is on the hook for it: requesting a reviewer is my move. Waiting means
+  // waiting on someone, and an open PR with no reviewer and no review is waiting on nobody. A draft
+  // says "still working" on its own, so it keeps its own lane below.
+  if (isAuthor && !pr.isDraft && pr.hasReviewer === false) {
+    return { group: "yours", tone: "review", label: "no reviewer" };
+  }
+
   if (pr.isDraft) return { group: "waiting", tone: "wait", label: "draft" };
   if (!isAuthor && CI_FAIL.has(pr.ciStatus)) return { group: "waiting", tone: "wait", label: "failing" };
   if (pr.ciStatus === "PENDING") return { group: "waiting", tone: "wait", label: "checks running" };

@@ -128,6 +128,7 @@ import { buildWebhookRoutes } from "./webhooks.ts";
 import { findDefinition, grep, localFileHistoryPatch, searchCtx, symbolMentionHistory } from "./repoSearch.ts";
 import { lsTree, showFile } from "./gitShow.ts";
 import { aggregateReviewScore, aggregateReviewStale, currentReviewerScores, reviewBots } from "./reviewScore.ts";
+import { hasReviewer } from "./reviewerPresence.ts";
 import { isMockGithub, mockGithub, MOCK_FIXTURE_CLOCK } from "./mockGithub.ts";
 import { createTmuxFocusHandler } from "./tmuxFocus.ts";
 import type { TmuxFocusHandler } from "./tmuxFocus.ts";
@@ -346,6 +347,9 @@ async function handleInbox(url: URL): Promise<Response> {
       autoMergeEnabled: pr.auto_merge_enabled === 1,
       viewerIsAuthor: pr.viewer_is_author === 1,
       viewerReviewRequested: pr.viewer_review_requested === 1,
+      // Nobody asked to look at it yet - which is the author's move, not a wait. Unknown detail
+      // shapes (index stubs) claim a reviewer so they keep classifying the way they always have.
+      hasReviewer: hasReviewShape ? hasReviewer(detail, pr.author) : true,
       viewerReviewState: pr.viewer_review_state,
       ciStatus: pr.ci_status,
       reviewDecision: pr.review_decision,
