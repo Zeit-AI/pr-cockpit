@@ -40,6 +40,16 @@ test("inline comments stage instead of publishing, and a verdict carries them", 
     out.afterDiscardCount = pendingCount(REPO, 1);
     out.afterDiscardReleased = listPendingComments(REPO, 1).every((row) => row.submitted_mutation_id === null);
 
+    // resubmitting after a failed submit supersedes it: no stale duplicate, and its summary survives
+    const failedId = enqueueMutation({ repo: REPO, number: 1, payload: { kind: "review-verdict", event: "REQUEST_CHANGES", body: "first summary" } });
+    db.query("UPDATE mutations SET state = 'failed' WHERE id = ?").run(failedId);
+    const resubmitId = enqueueMutation({ repo: REPO, number: 1, payload: { kind: "review-verdict", event: "COMMENT", body: "" } });
+    const resubmit = JSON.parse(db.query("SELECT payload_json FROM mutations WHERE id = ?").get(resubmitId).payload_json);
+    out.supersededGone = db.query("SELECT id FROM mutations WHERE id = ?").get(failedId) === null;
+    out.resubmitBody = resubmit.body;
+    out.resubmitCommentCount = resubmit.comments.length;
+    out.resubmitClaimed = listPendingComments(REPO, 1).every((row) => row.submitted_mutation_id === resubmitId);
+
     // a PR with nothing staged submits a bare verdict, with no comments key invented
     const bareId = enqueueMutation({ repo: REPO, number: 5, payload: { kind: "review-verdict", event: "APPROVE", body: "" } });
     out.bareVerdict = JSON.parse(db.query("SELECT payload_json FROM mutations WHERE id = ?").get(bareId).payload_json).comments ?? null;
@@ -78,6 +88,10 @@ test("inline comments stage instead of publishing, and a verdict carries them", 
     expect(result.claimed).toBe(true);
 
     expect(result.afterDiscardCount).toBe(2);
+    expect(result.supersededGone).toBe(true);
+    expect(result.resubmitBody).toBe("first summary");
+    expect(result.resubmitCommentCount).toBe(2);
+    expect(result.resubmitClaimed).toBe(true);
     expect(result.afterDiscardReleased).toBe(true);
 
     expect(result.bareVerdict).toBe(null);

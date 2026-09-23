@@ -14,6 +14,7 @@ import {
 import {
   addAssignees,
   closePullRequest,
+  fetchDiff,
   getViewerLogin,
   markPullRequestReadyForReview,
   postInlineComment,
@@ -32,6 +33,7 @@ import {
   type PrDetail,
 } from "./github.ts";
 import { clearSubmitted, isStagedMode, releaseClaim, snapshotCommentsIntoMutation, stageComment, type PendingReviewComment } from "./pendingReview.ts";
+import { commentableLines, foldIntoBody, isAnchorable, isUnresolvableAnchorError } from "./reviewAnchors.ts";
 import { pollOnce, refreshPr } from "./poller.ts";
 import { killFixerAgent, launchFixerAgent } from "./agents.ts";
 import { refreshRepoUsers } from "./repoUsers.ts";
@@ -166,6 +168,37 @@ export function currentBaseRef(repo: string, number: number): string {
   throw new Error(`no base ref known for ${repo}#${number} - cannot pick merge method`);
 }
 
+// A review whose anchors went stale (new commits, renamed files) is rejected whole by GitHub. Rather
+// than fail forever, re-place what still lands in the current diff and carry the rest in the body;
+// if GitHub still disagrees with that reading of the diff, everything goes in the body. The written
+// feedback always ships.
+async function postReviewKeepingComments(
+  repo: string,
+  number: number,
+  event: string,
+  body: string,
+  comments: PendingReviewComment[],
+): Promise<void> {
+  try {
+    await postReviewWithComments(repo, number, event, body, comments);
+    return;
+  } catch (err) {
+    if (!isUnresolvableAnchorError(err)) throw err;
+  }
+  const lines = commentableLines(await fetchDiff(repo, number));
+  const inline = comments.filter((comment) => isAnchorable(lines, comment));
+  const orphaned = comments.filter((comment) => !isAnchorable(lines, comment));
+  if (inline.length > 0) {
+    try {
+      await postReviewWithComments(repo, number, event, foldIntoBody(body, orphaned), inline);
+      return;
+    } catch (err) {
+      if (!isUnresolvableAnchorError(err)) throw err;
+    }
+  }
+  await postReview(repo, number, event, foldIntoBody(body, comments));
+}
+
 // returns whether this mutation took the PR out of the open set (merge/close), so the caller polls broadly
 async function executeMutation(row: MutationRow): Promise<boolean> {
   const payload: unknown = JSON.parse(row.payload_json);
@@ -188,16 +221,15 @@ async function executeMutation(row: MutationRow): Promise<boolean> {
       // Comments were snapshotted into the payload when the review was submitted, so a submit that
       // was queued offline ships exactly the review the reviewer saw, not whatever staging holds now.
       const comments = payload.comments ?? [];
-      if (payload.event !== "COMMENT" && pr?.author === viewerLogin) {
-        const prefix = payload.event === "APPROVE" ? "**APPROVED**" : "**CHANGES REQUESTED**";
-        const body = payload.body ? `${prefix}\n\n${payload.body}` : prefix;
-        if (comments.length > 0) await postReviewWithComments(row.repo, row.number, "COMMENT", body, comments);
-        else await postReview(row.repo, row.number, "COMMENT", body);
-      } else if (comments.length > 0) {
-        await postReviewWithComments(row.repo, row.number, payload.event, payload.body, comments);
-      } else {
-        await postReview(row.repo, row.number, payload.event, payload.body);
+      let event = payload.event;
+      let body = payload.body;
+      if (event !== "COMMENT" && pr?.author === viewerLogin) {
+        const prefix = event === "APPROVE" ? "**APPROVED**" : "**CHANGES REQUESTED**";
+        body = body ? `${prefix}\n\n${body}` : prefix;
+        event = "COMMENT";
       }
+      if (comments.length > 0) await postReviewKeepingComments(row.repo, row.number, event, body, comments);
+      else await postReview(row.repo, row.number, event, body);
       clearSubmitted(row.id);
       return false;
     }

@@ -91,7 +91,9 @@ function state(repo: string, number: number): Response {
       body: row.body,
       createdAt: row.created_at,
       // an in-flight comment is already inside a queued review and can no longer be edited or dropped
-      submitting: row.submitted_mutation_id !== null,
+      submitting: row.submitted_mutation_id !== null && owningMutationState(row) !== "failed",
+      // a failed submit keeps its comments; submitting the review again sends them in the new one
+      failed: owningMutationState(row) === "failed",
     })),
   });
 }

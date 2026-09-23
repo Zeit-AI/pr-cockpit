@@ -145,10 +145,29 @@ export function claimForSubmit(repo: string, number: number, mutationId: number)
 
 // Writes the claimed comments into the queued review so the mutation is self-contained: the worker
 // may not run until the machine is back online, and by then staging may have moved on.
-export function snapshotCommentsIntoMutation(repo: string, number: number, mutationId: number, payload: object): void {
+//
+// A new submit reclaims every staged comment, including ones still riding an earlier submit that
+// failed. That earlier mutation is superseded and deleted - retrying it later would post the same
+// comments twice - and its summary text is carried over so nothing the reviewer wrote is dropped.
+export function snapshotCommentsIntoMutation(
+  repo: string,
+  number: number,
+  mutationId: number,
+  payload: { body?: string },
+): void {
+  const superseded = db.query(
+    `SELECT DISTINCT m.id, m.payload_json FROM pending_review_comments c JOIN mutations m ON m.id = c.submitted_mutation_id
+     WHERE c.repo = ? AND c.number = ? AND m.state = 'failed' AND m.kind = 'review-verdict' AND m.id != ? ORDER BY m.id`,
+  ).all(repo, number, mutationId) as Array<{ id: number; payload_json: string }>;
+  const carried = superseded
+    .map((row) => (JSON.parse(row.payload_json) as { body?: string }).body?.trim() ?? "")
+    .filter((text) => text && text !== payload.body?.trim());
   const comments = claimForSubmit(repo, number, mutationId);
-  if (comments.length === 0) return;
-  db.query("UPDATE mutations SET payload_json = ? WHERE id = ?").run(JSON.stringify({ ...payload, comments }), mutationId);
+  for (const row of superseded) db.query("DELETE FROM mutations WHERE id = ?").run(row.id);
+  if (comments.length === 0 && carried.length === 0) return;
+  const body = [...carried, payload.body?.trim() ?? ""].filter(Boolean).join("\n\n");
+  db.query("UPDATE mutations SET payload_json = ? WHERE id = ?")
+    .run(JSON.stringify({ ...payload, body, ...(comments.length > 0 ? { comments } : {}) }), mutationId);
 }
 
 export function releaseClaim(mutationId: number): void {

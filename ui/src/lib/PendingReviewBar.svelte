@@ -106,7 +106,9 @@
               <span class="path">{comment.path}</span><span class="line">:{lineLabel(comment)}</span>
             </div>
             <div class="body">{comment.body}</div>
-            {#if comment.submitting}
+            {#if comment.failed}
+              <span class="failed" title="Submit the review again to resend it">submit failed</span>
+            {:else if comment.submitting}
               <span class="sending">submitting</span>
             {:else}
               <button class="drop" onclick={() => discard(comment.id)} title="Discard this comment">✕</button>
@@ -186,6 +188,7 @@
   .line { color: var(--text-faint); }
   .body { grid-column: 1 / -1; white-space: pre-wrap; color: var(--text); }
   .sending { font-size: 11px; color: var(--text-faint); }
+  .failed { font-size: 11px; color: var(--native-red); white-space: nowrap; }
   .drop { background: none; border: none; color: var(--text-faint); cursor: pointer; padding: 0 2px; font-size: 11px; }
   .drop:hover { color: var(--native-red); }
   .compose { padding: 8px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 6px; }
