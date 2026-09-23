@@ -234,7 +234,8 @@
     untrack(() => {
       loadInbox();
       loadRelayLive();
-      if (view === "closed") loadClosed();
+      if (view === "closed" || view === "mine") loadClosed();
+      if (view === "mine") loadArchived();
     });
   });
   $effect(() => {
@@ -307,10 +308,10 @@
       const res = await fetchRecentClosed();
       if (seq !== closedSeq) return;
       // a merge landing mid-navigation prepends a row; keep the same PR selected, not the same index
-      const selectedKey = view === "closed" && ordered[selected] ? prKey(ordered[selected]) : null;
+      const selectedKey = (view === "closed" || view === "mine") && ordered[selected] ? prKey(ordered[selected]) : null;
       closedPrs = res.prs;
       if (selectedKey !== null) {
-        const idx = filterByAuthors(filterByRepositories(closedPrs, selectedRepos), selectedAuthors).findIndex((pr) => prKey(pr) === selectedKey);
+        const idx = (view === "mine" ? minePrs : filteredClosedPrs).findIndex((pr) => prKey(pr) === selectedKey);
         if (idx >= 0) selected = idx;
       }
     } catch {
@@ -368,7 +369,8 @@
     restoreKey = null;
     allPrsSelectedKey = null;
     multiAnchor = null;
-    if (next === "closed") loadClosed();
+    if (next === "closed" || next === "mine") loadClosed();
+    if (next === "mine") loadArchived();
   }
 
 
@@ -408,6 +410,15 @@
   let filteredPrs = $derived(filterByAuthors(filterByRepositories(queryFilteredPrs, selectedRepos), selectedAuthors));
   let filteredClosedPrs = $derived(filterByAuthors(filterByRepositories(closedPrs, selectedRepos), selectedAuthors));
   let filteredAllPrs = $derived(filterByAuthors(allPrs, selectedAuthors));
+  // open (incl. archived) first, then recently merged/closed; the author filter is moot here
+  let minePrs = $derived.by(() => {
+    const seen = new Set();
+    return filterByRepositories([...prs, ...archivedPrs, ...closedPrs], selectedRepos).filter((pr) => {
+      if (!viewerLogin || pr.author !== viewerLogin || seen.has(prKey(pr))) return false;
+      seen.add(prKey(pr));
+      return true;
+    });
+  });
   let actionsHref = $derived.by(() => {
     const params = new URLSearchParams();
     if (selectedRepos.length === 0) params.append("repo", "");
@@ -625,7 +636,7 @@
     const pr = prs.find((p) => prKey(p) === dragKey);
     return pr ? (pr.rank != null ? "pinned" : classify(topUnit(pr), viewerLogin).group) : null;
   });
-  let ordered = $derived(view === "all" ? filteredAllPrs : view === "closed" ? filteredClosedPrs : showArchived ? [...openOrdered, ...archivedPrs] : openOrdered);
+  let ordered = $derived(view === "all" ? filteredAllPrs : view === "closed" ? filteredClosedPrs : view === "mine" ? minePrs : showArchived ? [...openOrdered, ...archivedPrs] : openOrdered);
   let archivedSet = $derived(new Set(archivedPrs.map((pr) => prKey(pr))));
   const isArchived = (pr) => archivedSet.has(prKey(pr));
 
@@ -639,9 +650,9 @@
       { key: "j / k", label: "move" },
       { key: "⏎", label: "open" },
     ];
-    if (view === "all" || view === "closed") {
+    if (view === "all" || view === "closed" || view === "mine") {
       keys.push({ key: "o", label: "github" });
-      keys.push({ key: "Tab", label: view === "all" ? "recently merged" : "back to open" });
+      keys.push({ key: "Tab", label: { all: "recently merged", closed: "my PRs", mine: "back to open" }[view] });
       return keys;
     }
     if (pr) keys.push({ key: "s", label: pr.rank == null ? "pin" : "unpin" });
@@ -852,7 +863,7 @@
       } else if (view === "open" && e.key === "A") {
         toggleArchived();
       } else if (e.key === "Tab") {
-        const tabs = ["open", "all", "closed"];
+        const tabs = ["open", "all", "closed", "mine"];
         showView(tabs[(tabs.indexOf(view) + (e.shiftKey ? tabs.length - 1 : 1)) % tabs.length]);
       } else {
         return;
@@ -897,13 +908,16 @@
         <button class="view-tab" role="tab" aria-selected={view === "open"} class:active={view === "open"} onclick={() => showView("open")}>
           Open
           <span class="view-tab-count">{filterByAuthors(filterByRepositories(prs, selectedRepos), selectedAuthors).length}</span>
-          {#if view === "closed"}<Kbd keys="tab" />{/if}
+          {#if view === "mine"}<Kbd keys="tab" />{/if}
         </button>
         <button class="view-tab" role="tab" aria-selected={view === "all"} class:active={view === "all"} onclick={() => showView("all")}>
           All PRs {#if view === "open"}<Kbd keys="tab" />{/if}
         </button>
         <button class="view-tab" role="tab" aria-selected={view === "closed"} class:active={view === "closed"} onclick={() => showView("closed")}>
           Recently merged {#if view === "all"}<Kbd keys="tab" />{/if}
+        </button>
+        <button class="view-tab" role="tab" aria-selected={view === "mine"} class:active={view === "mine"} onclick={() => showView("mine")}>
+          My PRs {#if view === "closed"}<Kbd keys="tab" />{/if}
         </button>
         <a class="view-tab" role="tab" aria-selected="false" href={actionsHref}>Actions</a>
       </div>
@@ -1098,7 +1112,7 @@
             <span>{pr.author}</span>
           </div>
         </div>
-        <span class="row-age mono" title={pr.terminalAt}>{relativeTime(pr.terminalAt)}</span>
+        <span class="row-age mono" title={pr.terminalAt ?? pr.updatedAt}>{relativeTime(pr.terminalAt ?? pr.updatedAt)}</span>
         {#if index === selected}<Kbd keys="enter" />{/if}
       </a>
     {/snippet}
@@ -1149,6 +1163,15 @@
               </div>
             </section>
           {/if}
+        {:else if view === "mine"}
+          {#if minePrs.length === 0}
+            <div class="empty">{closedLoaded ? `No pull requests by you${selectedRepos.length ? " in the selected repositories" : ""}` : "Loading your pull requests…"}</div>
+          {/if}
+          <section class="queue-group" aria-label="My pull requests">
+            <div class="group-body">
+              {#each minePrs as pr (prKey(pr))}{@render closedRow(pr)}{/each}
+            </div>
+          </section>
         {:else if view === "closed"}
           {#if !closedLoaded}
             <div class="empty">Loading recent merges…</div>

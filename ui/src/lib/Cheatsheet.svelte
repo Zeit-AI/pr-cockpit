@@ -68,7 +68,7 @@
       title: "Views",
       items: [
         { key: "A", label: "archived" },
-        { key: "Tab", label: "cycle open / all PRs / recently merged" },
+        { key: "Tab", label: "cycle open / all PRs / recently merged / my PRs" },
         { key: "⌘F", label: "filter" },
       ],
     },
