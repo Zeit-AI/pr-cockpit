@@ -314,21 +314,11 @@ const scenarios = [
   {
     name: "inbox-my-prs",
     route: "#/",
-    description: "Pull requests the viewer authored, open ones first, then recently finished ones.",
-    beforeGoto: async (page, { baseURL }) => {
-      const { prs, viewerLogin } = await requestJson(`${baseURL}/api/inbox`);
-      const terminalAt = new Date(FIXED_NOW - 1_800_000).toISOString();
-      const merged = { ...prs[0], number: 90, title: "Merged work by the viewer", author: viewerLogin, state: "MERGED", mergedAt: terminalAt, closedAt: terminalAt, terminalAt };
-      await page.route("**/api/closed", (route) => route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({ prs: [merged] }),
-      }));
-    },
+    description: "The viewer's currently open pull requests.",
     ready: ".inbox-layout",
     interact: async (page) => {
       await page.getByRole("tab", { name: /My PRs/ }).click();
-      await page.getByText("Merged work by the viewer", { exact: true }).waitFor();
+      await page.locator(".queue-group .row").first().waitFor();
     },
   },
   {

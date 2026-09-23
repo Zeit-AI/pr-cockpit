@@ -234,7 +234,7 @@
     untrack(() => {
       loadInbox();
       loadRelayLive();
-      if (view === "closed" || view === "mine") loadClosed();
+      if (view === "closed") loadClosed();
       if (view === "mine") loadArchived();
     });
   });
@@ -308,10 +308,10 @@
       const res = await fetchRecentClosed();
       if (seq !== closedSeq) return;
       // a merge landing mid-navigation prepends a row; keep the same PR selected, not the same index
-      const selectedKey = (view === "closed" || view === "mine") && ordered[selected] ? prKey(ordered[selected]) : null;
+      const selectedKey = view === "closed" && ordered[selected] ? prKey(ordered[selected]) : null;
       closedPrs = res.prs;
       if (selectedKey !== null) {
-        const idx = (view === "mine" ? minePrs : filteredClosedPrs).findIndex((pr) => prKey(pr) === selectedKey);
+        const idx = filteredClosedPrs.findIndex((pr) => prKey(pr) === selectedKey);
         if (idx >= 0) selected = idx;
       }
     } catch {
@@ -369,7 +369,7 @@
     restoreKey = null;
     allPrsSelectedKey = null;
     multiAnchor = null;
-    if (next === "closed" || next === "mine") loadClosed();
+    if (next === "closed") loadClosed();
     if (next === "mine") loadArchived();
   }
 
@@ -410,11 +410,11 @@
   let filteredPrs = $derived(filterByAuthors(filterByRepositories(queryFilteredPrs, selectedRepos), selectedAuthors));
   let filteredClosedPrs = $derived(filterByAuthors(filterByRepositories(closedPrs, selectedRepos), selectedAuthors));
   let filteredAllPrs = $derived(filterByAuthors(allPrs, selectedAuthors));
-  // open (incl. archived) first, then recently merged/closed; the author filter is moot here
+  // the viewer's currently open PRs, archived ones included; the author filter is moot here
   let minePrs = $derived.by(() => {
     const seen = new Set();
-    return filterByRepositories([...prs, ...archivedPrs, ...closedPrs], selectedRepos).filter((pr) => {
-      if (!viewerLogin || pr.author !== viewerLogin || seen.has(prKey(pr))) return false;
+    return filterByRepositories([...prs, ...archivedPrs], selectedRepos).filter((pr) => {
+      if (!viewerLogin || pr.author !== viewerLogin || pr.state !== "OPEN" || seen.has(prKey(pr))) return false;
       seen.add(prKey(pr));
       return true;
     });
@@ -1165,7 +1165,7 @@
           {/if}
         {:else if view === "mine"}
           {#if minePrs.length === 0}
-            <div class="empty">{closedLoaded ? `No pull requests by you${selectedRepos.length ? " in the selected repositories" : ""}` : "Loading your pull requests…"}</div>
+            <div class="empty">{loaded ? `No open pull requests by you${selectedRepos.length ? " in the selected repositories" : ""}` : "Loading your pull requests…"}</div>
           {/if}
           <section class="queue-group" aria-label="My pull requests">
             <div class="group-body">
