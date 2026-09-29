@@ -705,6 +705,8 @@ kbd {
 }
 .md img {
   max-width: 100%;
+  /* GitHub emits explicit width/height attributes; keep the ratio when max-width shrinks the image. */
+  height: auto;
   cursor: zoom-in;
 }
 .md .broken-img {
