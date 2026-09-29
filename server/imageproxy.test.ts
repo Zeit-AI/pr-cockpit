@@ -27,6 +27,23 @@ test("native image fetch follows only allowed GitHub redirects", async () => {
   ))).toBeNull();
 });
 
+test("private attachments send the token to github.com only and follow the signed S3 redirect", async () => {
+  const seen: { url: string; auth: string | undefined }[] = [];
+  const signed = "https://github-production-user-asset-6210df.s3.amazonaws.com/1/2-abc.png?X-Amz-Signature=x";
+  const bytes = await fetchAllowedImage("https://github.com/user-attachments/assets/abc", async (input, init) => {
+    const url = String(input);
+    seen.push({ url, auth: (init?.headers as Record<string, string>)?.authorization });
+    if (url.startsWith("https://github.com/")) return new Response(null, { status: 302, headers: { location: signed } });
+    return new Response(png);
+  }, "tok");
+  expect(bytes).toEqual(png);
+  expect(seen).toEqual([
+    { url: "https://github.com/user-attachments/assets/abc", auth: "Bearer tok" },
+    { url: signed, auth: undefined },
+  ]);
+  expect(await fetchAllowedImage("https://evil.s3.amazonaws.com/x.png", async () => new Response(png), "tok")).toBeNull();
+});
+
 async function imageScenario(scenario: string): Promise<Record<string, any>> {
   const dataDir = mkdtempSync(join(tmpdir(), "pr-cockpit-images-"));
   try {

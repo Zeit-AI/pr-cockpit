@@ -1,4 +1,5 @@
 import { accessSync, constants, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { ghToken } from "./github.ts";
 import { mockGithub } from "./mockGithub.ts";
 import { mockScreenshotSvg } from "./mockImages.ts";
 
@@ -7,6 +8,13 @@ const ALLOWED_HOSTS = new Set([
   "private-user-images.githubusercontent.com",
   "raw.githubusercontent.com",
 ]);
+
+// Private-repo attachments 302 from github.com to a short-lived signed S3 URL.
+const SIGNED_HOST_RE = /^github-production-user-asset-[a-z0-9]+\.s3\.amazonaws\.com$/;
+
+function hostAllowed(host: string): boolean {
+  return ALLOWED_HOSTS.has(host) || SIGNED_HOST_RE.test(host);
+}
 
 const IMAGE_CACHE_BYTES = 256 * 1024 * 1024;
 
@@ -48,7 +56,11 @@ function ghImgAvailable(): boolean {
   }
 }
 
-export async function fetchAllowedImage(raw: string, fetcher: typeof fetch = fetch): Promise<Uint8Array | null> {
+export async function fetchAllowedImage(
+  raw: string,
+  fetcher: typeof fetch = fetch,
+  token: string | null = null,
+): Promise<Uint8Array | null> {
   let target: URL;
   try {
     target = new URL(raw);
@@ -56,8 +68,12 @@ export async function fetchAllowedImage(raw: string, fetcher: typeof fetch = fet
     return null;
   }
   for (let redirect = 0; redirect < 4; redirect++) {
-    if (target.protocol !== "https:" || !ALLOWED_HOSTS.has(target.host)) return null;
-    const response = await fetcher(target, { redirect: "manual", headers: { accept: "image/*" } });
+    if (target.protocol !== "https:" || !hostAllowed(target.host)) return null;
+    // github.com/user-attachments needs the token to 302 to its signed URL; the signed host rejects
+    // a request carrying Authorization, so only the github.com hop sends it.
+    const headers: Record<string, string> = { accept: "image/*" };
+    if (token && target.host === "github.com") headers.authorization = `Bearer ${token}`;
+    const response = await fetcher(target, { redirect: "manual", headers });
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get("location");
       if (!location) return null;
@@ -128,7 +144,7 @@ async function loadImage(raw: string): Promise<ImageResult> {
   } catch {
     return { error: "invalid url", status: 400 };
   }
-  if (target.protocol !== "https:" || !ALLOWED_HOSTS.has(target.host)) {
+  if (target.protocol !== "https:" || !hostAllowed(target.host)) {
     return { error: "host not allowed", status: 400 };
   }
 
@@ -139,7 +155,8 @@ async function loadImage(raw: string): Promise<ImageResult> {
     return { bytes: new Uint8Array(await cached.arrayBuffer()) };
   }
 
-  const fetched = await fetchAllowedImage(raw).catch(() => null);
+  const token = await ghToken().catch(() => null);
+  const fetched = await fetchAllowedImage(raw, fetch, token).catch(() => null);
   if (fetched) {
     mkdirSync(cacheDir, { recursive: true });
     await Bun.write(cachePath, fetched);
